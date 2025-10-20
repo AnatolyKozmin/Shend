@@ -1,6 +1,7 @@
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters.state import StateFilter
@@ -36,9 +37,10 @@ async def create_rass(message: types.Message, state: FSMContext):
         await message.answer('Нет записей с факультетами в базе.')
         return
 
-    kb = InlineKeyboardMarkup()
+    kb = InlineKeyboardBuilder()
     for f in faculties:
-        kb.add(InlineKeyboardButton(text=f, callback_data=f"co_faculty:{f}"))
+        kb.row(InlineKeyboardButton(text=f, callback_data=f"co_faculty:{f}"))
+    kb = kb.as_markup()
 
     await state.set_state(COCreateStates.waiting_faculty)
     await message.answer('Выберите факультет для рассылки:', reply_markup=kb)
@@ -54,10 +56,12 @@ async def faculty_chosen(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(faculty=faculty)
     await state.set_state(COCreateStates.waiting_presence)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='Да (присутствие)', callback_data='co_presence:yes'),
-         InlineKeyboardButton(text='Нет', callback_data='co_presence:no')]
-    ])
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text='Да (присутствие)', callback_data='co_presence:yes'),
+        InlineKeyboardButton(text='Нет', callback_data='co_presence:no')
+    )
+    kb = kb.as_markup()
 
     await callback.message.answer(f'Выбран факультет: {faculty}\nЭто рассылка для присутствия?', reply_markup=kb)
     await callback.answer()
@@ -102,10 +106,10 @@ async def receive_text(message: types.Message, state: FSMContext):
 
     # Клавиатура для опроса
     def mk_kb(campaign_id: int):
-        kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton(text='Да', callback_data=f'co_answer:{campaign_id}:yes'))
-        kb.add(InlineKeyboardButton(text='Нет', callback_data=f'co_answer:{campaign_id}:no'))
-        return kb
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text='Да', callback_data=f'co_answer:{campaign_id}:yes'))
+        kb.row(InlineKeyboardButton(text='Нет', callback_data=f'co_answer:{campaign_id}:no'))
+        return kb.as_markup()
 
     sent = 0
     errors = 0
