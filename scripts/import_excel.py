@@ -33,6 +33,7 @@ except Exception as e:
 
 from db.engine import async_session_maker
 from db.models import Person
+from sqlalchemy import text
 
 
 def detect_columns(header_row):
@@ -77,7 +78,7 @@ async def import_excel(file_path: str):
 
     # Подгружаем существующие значения из БД для ускорения проверок
     async with async_session_maker() as session:
-        res = await session.execute("SELECT telegram_username, lower(full_name), lower(coalesce(faculty, '')), lower(coalesce(course, '')) FROM people")
+        res = await session.execute(text("SELECT telegram_username, lower(full_name), lower(coalesce(faculty, '')), lower(coalesce(course, '')) FROM people"))
         rows_db = res.fetchall()
 
     existing_usernames = set()
