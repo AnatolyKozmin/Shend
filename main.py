@@ -20,6 +20,6 @@ dp.include_router(admin_router)
 
 async def main():
     print('Бот работает !')
-    await dp.start_pooling(bot)
+    await dp.start_polling(bot)
 
 asyncio.run(main())
