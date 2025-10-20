@@ -3,10 +3,12 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters.state import StateFilter
 import asyncio
 from sqlalchemy import select, func
 from db.engine import async_session_maker
 from db.models import CO, COResponse, Person, BotUser
+
 
 admin_router = Router()
 
@@ -76,7 +78,7 @@ async def presence_chosen(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@admin_router.message(state=COCreateStates.waiting_text)
+@admin_router.message(StateFilter(COCreateStates.waiting_text))
 async def receive_text(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
