@@ -22,6 +22,10 @@ class COCreateStates(StatesGroup):
     waiting_text = State()
 
 
+class AllRassStates(StatesGroup):
+    waiting_text = State()
+
+
 @admin_router.message(Command(commands=['create_rass']))
 async def create_rass(message: types.Message, state: FSMContext):
     # только админ
@@ -125,6 +129,44 @@ async def receive_text(message: types.Message, state: FSMContext):
             errors += 1
 
     await message.answer(f'Рассылка отправлена. Найдено: {len(recipients)}, успешно отправлено: {sent}, ошибок: {errors}')
+    await state.clear()
+
+
+
+@admin_router.message(Command(commands=['create_all_rass', 'creare_all_rass']))
+async def create_all_rass(message: types.Message, state: FSMContext):
+    # команда для рассылки ВСЕМ записанным в базе пользователям (без кнопок)
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    await state.set_state(AllRassStates.waiting_text)
+    await message.answer('Пришлите текст распространения, который нужно разослать ВСЕМ пользователям (без кнопок).')
+
+
+@admin_router.message(StateFilter(AllRassStates.waiting_text))
+async def receive_all_text(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    text = message.text
+
+    async with async_session_maker() as session:
+        stmt = select(BotUser)
+        res = await session.execute(stmt)
+        recipients = res.scalars().all()
+
+    sent = 0
+    errors = 0
+    PAUSE_SECONDS = 0.1
+    for bu in recipients:
+        try:
+            await message.bot.send_message(chat_id=bu.tg_id, text=text)
+            sent += 1
+            await asyncio.sleep(PAUSE_SECONDS)
+        except Exception:
+            errors += 1
+
+    await message.answer(f'Рассылка всем завершена. Найдено в базе: {len(recipients)}, успешно отправлено: {sent}, ошибок: {errors}')
     await state.clear()
 
 
