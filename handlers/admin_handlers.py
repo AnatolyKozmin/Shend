@@ -120,7 +120,12 @@ async def receive_text(message: types.Message, state: FSMContext):
     PAUSE_SECONDS = 0.1
     for bu in recipients:
         try:
-            await message.bot.send_message(chat_id=bu.tg_id, text=text, reply_markup=mk_kb(campaign.id))
+            # Если это рассылка НЕ для присутствия — отправляем просто текст без inline-кнопок
+            if is_presence:
+                reply = mk_kb(campaign.id)
+                await message.bot.send_message(chat_id=bu.tg_id, text=text, reply_markup=reply)
+            else:
+                await message.bot.send_message(chat_id=bu.tg_id, text=text)
             sent += 1
             # Небольшая пауза между отправками, чтобы снизить риск достижения лимитов
             await asyncio.sleep(PAUSE_SECONDS)
