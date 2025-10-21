@@ -74,7 +74,7 @@ async def user_start(message: types.Message):
     else:
         await message.answer(text=(
             "Если у вас скрыт или отсутствует Telegram‑username, либо мы не нашли вашу запись в базе,\n"
-            "пожалуйста, обратитесь в сообщество ША в ВК или к админу бота @yanejettt"
+            "пожалуйста, обратитесь в сообщество ША https://vk.com/schoolofactivity?from=groups"
         ))
 
 
