@@ -20,10 +20,15 @@ async def user_start(message: types.Message):
     """
     tg_user = message.from_user
     tg_id = tg_user.id
-    username = tg_user.username
+    raw_username = tg_user.username
 
-    # Нормализуем username: если есть, приведём к формату с @ и без
-    username_with_at = f"@{username}" if username else None
+    # Нормализуем username: удаляем ведущий @ (если есть) и приводим к нижнему регистру
+    if raw_username:
+        username = str(raw_username).strip().lstrip('@').lower()
+        username_with_at = f"@{username}"
+    else:
+        username = None
+        username_with_at = None
 
     async with async_session_maker() as session:
         # Попытаемся найти Person по username с @ или без
@@ -44,9 +49,10 @@ async def user_start(message: types.Message):
         bot_user = res.scalars().first()
 
         if bot_user:
-            # Обновляем username и связь на Person при необходимости
+            # Обновляем username (храним в БД нормализованный вариант без @) и связь на Person при необходимости
             changed = False
-            if username and bot_user.telegram_username != username and bot_user.telegram_username != username_with_at:
+            # bot_user.telegram_username в базе ожидается без @ и в нижнем регистре
+            if username and bot_user.telegram_username != username:
                 bot_user.telegram_username = username
                 changed = True
             if person and bot_user.person_id != person.id:
@@ -56,7 +62,7 @@ async def user_start(message: types.Message):
                 session.add(bot_user)
                 await session.commit()
         else:
-            bot_user = BotUser(tg_id=tg_id, telegram_username=username or username_with_at, person_id=person.id if person else None)
+            bot_user = BotUser(tg_id=tg_id, telegram_username=username, person_id=person.id if person else None)
             session.add(bot_user)
             await session.commit()
 

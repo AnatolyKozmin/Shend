@@ -243,10 +243,27 @@ async def get_stats(message: types.Message):
             no_res = await session.execute(no_stmt)
             no_count = no_res.scalar() or 0
 
+            # Списки ФИО (или фамилий) проголосовавших 'yes' и 'no'
+            # Получаем full_name из Person через BotUser
+            yes_names = []
+            no_names = []
+
+            yes_names_stmt = select(Person.full_name).join(BotUser, BotUser.person_id == Person.id).join(COResponse, COResponse.bot_user_id == BotUser.id).join(CO, COResponse.campaign_id == CO.id).where(CO.faculty == faculty, COResponse.answer == 'yes')
+            yes_names_res = await session.execute(yes_names_stmt)
+            yes_names = [r[0] for r in yes_names_res.fetchall() if r[0]]
+
+            no_names_stmt = select(Person.full_name).join(BotUser, BotUser.person_id == Person.id).join(COResponse, COResponse.bot_user_id == BotUser.id).join(CO, COResponse.campaign_id == CO.id).where(CO.faculty == faculty, COResponse.answer == 'no')
+            no_names_res = await session.execute(no_names_stmt)
+            no_names = [r[0] for r in no_names_res.fetchall() if r[0]]
+
             text = (
                 f"Факультет: {faculty}\n"
                 f"Получателей (связанных с ботом): {recipients}\n"
                 f"Ответы — Да: {yes_count}, Нет: {no_count}"
             )
 
+            if yes_names:
+                text += '\n\nПоставили "Да":\n' + '\n'.join(yes_names)
+            if no_names:
+                text += '\n\nПоставили "Нет":\n' + '\n'.join(no_names)
             await message.answer(text)
