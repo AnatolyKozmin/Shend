@@ -80,7 +80,7 @@ async def user_start(message: types.Message):
     else:
         await message.answer(text=(
             "Если у вас скрыт или отсутствует Telegram‑username, либо мы не нашли вашу запись в базе,\n"
-            "пожалуйста, обратитесь в сообщество ША https://vk.com/schoolofactivity?from=groups"
+            "пожалуйста, напишите @yanejettt"
         ))
 
 
@@ -160,5 +160,84 @@ async def get_people_by_faculty(message: types.Message):
             # Отправляем сообщение, если оно не пустое
             if faculty_text.strip() != f"🎓 {faculty}\n\n─" * 30:
                 await message.answer(faculty_text)
+
+
+@user_router.message(Command('CO'))
+async def user_co(message: types.Message):
+    """Команда /CO - регистрация пользователя в боте (аналогично /start).
+    
+    Логика:
+    - Проверяем, есть ли пользователь уже в BotUser
+    - Если НЕТ - выполняем логику /start (поиск в Person и создание BotUser)
+    - Если ЕСТЬ - показываем сообщение о том, что пользователь уже зарегистрирован
+    """
+    tg_user = message.from_user
+    tg_id = tg_user.id
+    raw_username = tg_user.username
+
+    # Нормализуем username: удаляем ведущий @ (если есть) и приводим к нижнему регистру
+    if raw_username:
+        username = str(raw_username).strip().lstrip('@').lower()
+        username_with_at = f"@{username}"
+    else:
+        username = None
+        username_with_at = None
+
+    async with async_session_maker() as session:
+        # Сначала проверяем, есть ли пользователь уже в BotUser
+        existing_bot_user_stmt = select(BotUser).where(BotUser.tg_id == tg_id)
+        existing_result = await session.execute(existing_bot_user_stmt)
+        existing_bot_user = existing_result.scalars().first()
+
+        # Если пользователь уже есть в BotUser - показываем сообщение
+        if existing_bot_user:
+            if existing_bot_user.person:
+                await message.answer(
+                    f"Привет, {existing_bot_user.person.full_name}!\n\n"
+                    "Ты уже зарегистрирован в боте. Здесь будет приходить рассылка важной информации, "
+                    "поэтому не ставь его в мьют и следи за новостями. 🤍"
+                )
+            else:
+                await message.answer(
+                    "Ты уже зарегистрирован в боте!\n\n"
+                    "Здесь будет приходить рассылка важной информации, "
+                    "поэтому не ставь его в мьют и следи за новостями. 🤍"
+                )
+            return
+
+        # Если пользователя нет в BotUser - выполняем логику /start
+        # Попытаемся найти Person по username с @ или без
+        person_stmt = None
+        if username_with_at:
+            person_stmt = select(Person).where(
+                (Person.telegram_username == username_with_at) | (Person.telegram_username == username)
+            )
+        else:
+            person_stmt = select(Person).where(Person.telegram_username == None)
+
+        result = await session.execute(person_stmt)
+        person = result.scalars().first()
+
+        # Создаём BotUser (так как мы уже проверили, что его нет)
+        bot_user = BotUser(tg_id=tg_id, telegram_username=username, person_id=person.id if person else None)
+        session.add(bot_user)
+        await session.commit()
+
+    CO_MESSAGE = (
+        "Привет!\n\n"
+        "Это бот «Школы Актива», здесь будет приходить рассылка важной информации, поэтому не ставь его в мьют и следи за новостями. 🤍"
+    )
+
+    # Всегда показываем приветственное сообщение
+    await message.answer(text=CO_MESSAGE)
+
+    # Если найдена запись в базе — дополнительно подтверждаем связь
+    if person:
+        await message.answer(text=f"{person.full_name}, твоя анкета найдена!")
+    else:
+        await message.answer(text=(
+            "Если у вас скрыт или отсутствует Telegram‑username, либо мы не нашли вашу запись в базе,\n"
+            "пожалуйста, напишите @yanejettt"
+        ))
 
 
