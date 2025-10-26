@@ -123,81 +123,42 @@ async def get_people_by_faculty(message: types.Message):
             await message.answer("В базе данных нет людей с указанными факультетами.")
             return
         
-        response_text = "📊 **Статистика по факультетам:**\n\n"
-        
-        for faculty, groups in sorted(faculty_groups.items()):
-            response_text += f"🎓 **{faculty}**\n"
-            
-            # Люди в боте
-            if groups["in_bot"]:
-                response_text += f"✅ В боте ({len(groups['in_bot'])} чел.):\n"
-                for person in groups["in_bot"]:
-                    response_text += f"• {person.full_name}\n"
-                response_text += "\n"
-            
-            # Люди не в боте
-            if groups["not_in_bot"]:
-                response_text += f"❌ Не в боте ({len(groups['not_in_bot'])} чел.):\n"
-                for person in groups["not_in_bot"]:
-                    telegram_info = f" (@{person.telegram_username})" if person.telegram_username else " (нет телеграма)"
-                    response_text += f"• {person.full_name}{telegram_info}\n"
-                response_text += "\n"
-            
-            response_text += "─" * 30 + "\n\n"
-        
         # Добавляем общую статистику
         total_in_bot = sum(len(groups["in_bot"]) for groups in faculty_groups.values())
         total_not_in_bot = sum(len(groups["not_in_bot"]) for groups in faculty_groups.values())
         
-        response_text += f"📈 **Общая статистика:**\n"
-        response_text += f"✅ В боте: {total_in_bot} чел.\n"
-        response_text += f"❌ Не в боте: {total_not_in_bot} чел.\n"
-        response_text += f"📊 Всего: {total_in_bot + total_not_in_bot} чел."
+        # Отправляем общую статистику сначала
+        stats_text = f"📊 Статистика по факультетам\n\n"
+        stats_text += f"✅ В боте: {total_in_bot} чел.\n"
+        stats_text += f"❌ Не в боте: {total_not_in_bot} чел.\n"
+        stats_text += f"📈 Всего: {total_in_bot + total_not_in_bot} чел.\n\n"
+        stats_text += "─" * 30
         
-        # Разбиваем сообщение на части, если оно слишком длинное
-        max_length = 4000
-        if len(response_text) <= max_length:
-            await message.answer(response_text, parse_mode="Markdown")
-        else:
-            # Разбиваем по факультетам
-            current_text = "📊 **Статистика по факультетам:**\n\n"
+        await message.answer(stats_text)
+        
+        # Отправляем по факультетам отдельными сообщениями
+        for faculty, groups in sorted(faculty_groups.items()):
+            faculty_text = f"🎓 {faculty}\n\n"
             
-            for faculty, groups in sorted(faculty_groups.items()):
-                faculty_text = f"🎓 **{faculty}**\n"
-                
-                # Люди в боте
-                if groups["in_bot"]:
-                    faculty_text += f"✅ В боте ({len(groups['in_bot'])} чел.):\n"
-                    for person in groups["in_bot"]:
-                        faculty_text += f"• {person.full_name}\n"
-                    faculty_text += "\n"
-                
-                # Люди не в боте
-                if groups["not_in_bot"]:
-                    faculty_text += f"❌ Не в боте ({len(groups['not_in_bot'])} чел.):\n"
-                    for person in groups["not_in_bot"]:
-                        telegram_info = f" (@{person.telegram_username})" if person.telegram_username else " (нет телеграма)"
-                        faculty_text += f"• {person.full_name}{telegram_info}\n"
-                    faculty_text += "\n"
-                
-                faculty_text += "─" * 30 + "\n\n"
-                
-                if len(current_text + faculty_text) > max_length:
-                    await message.answer(current_text, parse_mode="Markdown")
-                    current_text = faculty_text
-                else:
-                    current_text += faculty_text
+            # Люди в боте
+            if groups["in_bot"]:
+                faculty_text += f"✅ В боте ({len(groups['in_bot'])} чел.):\n"
+                for person in groups["in_bot"]:
+                    faculty_text += f"• {person.full_name}\n"
+                faculty_text += "\n"
             
-            # Отправляем последнюю часть с общей статистикой
-            stats_text = f"📈 **Общая статистика:**\n"
-            stats_text += f"✅ В боте: {total_in_bot} чел.\n"
-            stats_text += f"❌ Не в боте: {total_not_in_bot} чел.\n"
-            stats_text += f"📊 Всего: {total_in_bot + total_not_in_bot} чел."
+            # Люди не в боте
+            if groups["not_in_bot"]:
+                faculty_text += f"❌ Не в боте ({len(groups['not_in_bot'])} чел.):\n"
+                for person in groups["not_in_bot"]:
+                    telegram_info = f" (@{person.telegram_username})" if person.telegram_username else " (нет телеграма)"
+                    faculty_text += f"• {person.full_name}{telegram_info}\n"
+                faculty_text += "\n"
             
-            if len(current_text + stats_text) > max_length:
-                await message.answer(current_text, parse_mode="Markdown")
-                await message.answer(stats_text, parse_mode="Markdown")
-            else:
-                await message.answer(current_text + stats_text, parse_mode="Markdown")
+            faculty_text += "─" * 30
+            
+            # Отправляем сообщение, если оно не пустое
+            if faculty_text.strip() != f"🎓 {faculty}\n\n─" * 30:
+                await message.answer(faculty_text)
 
 
