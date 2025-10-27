@@ -306,14 +306,10 @@ async def get_all_users(message: types.Message):
                 await message.answer(current_text)
 
 
-@user_router.message()
+@user_router.message(lambda message: message.text and message.text.startswith('!'))
 async def search_by_name(message: types.Message):
     """Поиск участника по ФИО через команду !Фамилия Имя Отчество."""
     text = message.text.strip()
-    
-    # Проверяем, что сообщение начинается с !
-    if not text.startswith('!'):
-        return
     
     # Убираем ! и получаем поисковый запрос
     search_query = text[1:].strip()
