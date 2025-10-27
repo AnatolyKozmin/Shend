@@ -1,5 +1,6 @@
 from aiogram import Router, types
 from aiogram.filters import CommandStart, Command
+from aiogram.types import Message
 from db.engine import async_session_maker
 from db.models import Person, BotUser
 from sqlalchemy import select, func
@@ -251,5 +252,116 @@ async def user_co(message: types.Message):
             "Если у вас скрыт или отсутствует Telegram‑username, либо мы не нашли вашу запись в базе,\n"
             "пожалуйста, напишите @yanejettt"
         ))
+
+
+@user_router.message(Command('get_all_users'))
+async def get_all_users(message: types.Message):
+    """Команда для получения списка всех пользователей с их юзернеймами."""
+    async with async_session_maker() as session:
+        # Получаем всех пользователей бота с их связанными Person
+        bot_users_stmt = select(BotUser).where(BotUser.person_id.isnot(None))
+        bot_users_result = await session.execute(bot_users_stmt)
+        bot_users = bot_users_result.scalars().all()
+        
+        if not bot_users:
+            await message.answer("В боте пока нет зарегистрированных пользователей.")
+            return
+        
+        # Загружаем связанные Person для всех пользователей
+        person_ids = [bu.person_id for bu in bot_users]
+        people_stmt = select(Person).where(Person.id.in_(person_ids)).order_by(Person.full_name)
+        people_result = await session.execute(people_stmt)
+        people = people_result.scalars().all()
+        
+        # Создаем словарь для быстрого поиска Person по ID
+        people_dict = {person.id: person for person in people}
+        
+        # Формируем сообщения
+        response_text = f"👥 Все пользователи бота ({len(bot_users)} чел.):\n\n"
+        
+        for bot_user in bot_users:
+            person = people_dict.get(bot_user.person_id)
+            if person:
+                telegram_info = f"@{bot_user.telegram_username}" if bot_user.telegram_username else "нет юзернейма"
+                faculty_info = f" ({person.faculty})" if person.faculty else ""
+                response_text += f"• {person.full_name}{faculty_info} - {telegram_info}\n"
+        
+        # Разбиваем на части, если сообщение слишком длинное
+        max_length = 4000
+        if len(response_text) <= max_length:
+            await message.answer(response_text)
+        else:
+            # Разбиваем по частям
+            lines = response_text.split('\n')
+            current_text = f"👥 Все пользователи бота ({len(bot_users)} чел.):\n\n"
+            
+            for line in lines[2:]:  # Пропускаем заголовок и пустую строку
+                if len(current_text + line + '\n') > max_length:
+                    await message.answer(current_text)
+                    current_text = line + '\n'
+                else:
+                    current_text += line + '\n'
+            
+            if current_text.strip():
+                await message.answer(current_text)
+
+
+@user_router.message()
+async def search_by_name(message: types.Message):
+    """Поиск участника по ФИО через команду !Фамилия Имя Отчество."""
+    text = message.text.strip()
+    
+    # Проверяем, что сообщение начинается с !
+    if not text.startswith('!'):
+        return
+    
+    # Убираем ! и получаем поисковый запрос
+    search_query = text[1:].strip()
+    
+    if not search_query:
+        await message.answer("Пожалуйста, укажите ФИО после восклицательного знака.\nПример: !Иванов Иван Иванович")
+        return
+    
+    async with async_session_maker() as session:
+        # Ищем по полному имени (точное совпадение)
+        exact_stmt = select(Person).where(Person.full_name.ilike(f"%{search_query}%"))
+        exact_result = await session.execute(exact_stmt)
+        exact_matches = exact_result.scalars().all()
+        
+        if not exact_matches:
+            await message.answer(f"❌ Участник с именем '{search_query}' не найден.")
+            return
+        
+        # Формируем ответ
+        if len(exact_matches) == 1:
+            person = exact_matches[0]
+            response_text = f"👤 **{person.full_name}**\n\n"
+            
+            if person.faculty:
+                response_text += f"🎓 Факультет: {person.faculty}\n"
+            
+            if person.course:
+                response_text += f"📚 Курс: {person.course}\n"
+            
+            if person.telegram_username:
+                response_text += f"📱 Telegram: @{person.telegram_username}"
+            else:
+                response_text += "📱 Telegram: не указан"
+            
+            await message.answer(response_text, parse_mode="Markdown")
+            
+        else:
+            # Если найдено несколько совпадений
+            response_text = f"🔍 Найдено {len(exact_matches)} совпадений для '{search_query}':\n\n"
+            
+            for person in exact_matches[:10]:  # Ограничиваем до 10 результатов
+                telegram_info = f"@{person.telegram_username}" if person.telegram_username else "нет телеграма"
+                faculty_info = f" ({person.faculty})" if person.faculty else ""
+                response_text += f"• {person.full_name}{faculty_info} - {telegram_info}\n"
+            
+            if len(exact_matches) > 10:
+                response_text += f"\n... и еще {len(exact_matches) - 10} результатов"
+            
+            await message.answer(response_text)
 
 
