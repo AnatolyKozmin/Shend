@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, and_, or_
 from db.engine import async_session_maker
-from db.models import Interviewer, BotUser, TimeSlot, Interview, Person
+from db.models import Interviewer, BotUser, TimeSlot, Interview, Person, InterviewMessage
 from utils.google_sheets import find_interviewer_by_code, get_schedules_data
 from datetime import datetime
 import random
@@ -25,6 +25,12 @@ class BookingSobesStates(StatesGroup):
     waiting_date = State()
     waiting_time = State()
     waiting_confirmation = State()
+
+
+class QuestionStates(StatesGroup):
+    """Состояния для системы вопросов/ответов."""
+    waiting_question = State()  # Кандидат вводит вопрос
+    waiting_answer = State()    # Собеседующий вводит ответ
 
 
 @interview_router.message(Command('register_sobes'))
@@ -591,8 +597,9 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
             bot_user_result = await session.execute(bot_user_stmt)
             bot_user = bot_user_result.scalars().first()
             
-            # Получаем слот
-            slot_stmt = select(TimeSlot).where(TimeSlot.id == selected_slot_id)
+            # Получаем слот С БЛОКИРОВКОЙ (FOR UPDATE)
+            # Это предотвращает race condition при одновременной записи
+            slot_stmt = select(TimeSlot).where(TimeSlot.id == selected_slot_id).with_for_update()
             slot_result = await session.execute(slot_stmt)
             slot = slot_result.scalars().first()
             
@@ -603,6 +610,10 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
                     "Используйте /sobes чтобы выбрать другое время."
                 )
                 await state.clear()
+                try:
+                    await callback.answer("Время уже занято", show_alert=True)
+                except TelegramBadRequest:
+                    pass
                 return
             
             # Создаём запись
@@ -804,14 +815,297 @@ async def cancel_interview_callback(callback: types.CallbackQuery, state: FSMCon
 
 @interview_router.callback_query(F.data.startswith('ask_question:'))
 async def ask_question_callback(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка кнопки 'Задать вопрос' (заглушка)."""
+    """Обработка кнопки 'Задать вопрос'."""
+    interview_id = int(callback.data.split(':')[1])
+    tg_id = callback.from_user.id
+    
+    async with async_session_maker() as session:
+        # Проверяем что интервью существует и принадлежит пользователю
+        stmt = select(Interview).join(BotUser).where(
+            Interview.id == interview_id,
+            BotUser.tg_id == tg_id
+        )
+        result = await session.execute(stmt)
+        interview = result.scalars().first()
+        
+        if not interview:
+            await callback.answer("❌ Запись не найдена", show_alert=True)
+            return
+        
+        if interview.status == 'cancelled':
+            await callback.answer("❌ Нельзя задать вопрос по отменённой записи", show_alert=True)
+            return
+    
+    # Сохраняем interview_id в state
+    await state.update_data(interview_id=interview_id)
+    await state.set_state(QuestionStates.waiting_question)
+    
     await callback.message.edit_text(
-        "📝 Функция отправки вопросов собеседующему в разработке.\n\n"
-        "Пока вы можете связаться с администратором для передачи вопроса."
+        "📝 Задайте вопрос собеседующему:\n\n"
+        "Напишите ваш вопрос в следующем сообщении.\n"
+        "Собеседующий получит уведомление и сможет вам ответить."
     )
     
     try:
-        await callback.answer("В разработке")
+        await callback.answer()
     except TelegramBadRequest:
         pass
+
+
+@interview_router.message(QuestionStates.waiting_question)
+async def process_question(message: types.Message, state: FSMContext):
+    """Обработка вопроса от кандидата."""
+    question_text = message.text.strip()
+    
+    if not question_text:
+        await message.answer("❌ Вопрос не может быть пустым. Попробуйте снова:")
+        return
+    
+    if len(question_text) > 1000:
+        await message.answer("❌ Вопрос слишком длинный (максимум 1000 символов). Сократите текст:")
+        return
+    
+    data = await state.get_data()
+    interview_id = data.get('interview_id')
+    tg_id = message.from_user.id
+    
+    async with async_session_maker() as session:
+        # Получаем интервью с данными собеседующего
+        stmt = select(Interview).where(Interview.id == interview_id)
+        result = await session.execute(stmt)
+        interview = result.scalars().first()
+        
+        if not interview:
+            await message.answer("❌ Запись не найдена")
+            await state.clear()
+            return
+        
+        # Получаем собеседующего
+        stmt = select(Interviewer).where(Interviewer.id == interview.interviewer_id)
+        result = await session.execute(stmt)
+        interviewer = result.scalars().first()
+        
+        if not interviewer:
+            await message.answer("❌ Собеседующий не найден")
+            await state.clear()
+            return
+        
+        # Сохраняем сообщение в БД
+        new_message = InterviewMessage(
+            interview_id=interview_id,
+            from_user_id=tg_id,
+            to_user_id=interviewer.telegram_id,
+            message_text=question_text,
+            is_read=False
+        )
+        session.add(new_message)
+        await session.commit()
+        await session.refresh(new_message)
+        message_db_id = new_message.id
+    
+    await state.clear()
+    await message.answer(
+        "✅ Ваш вопрос отправлен собеседующему!\n\n"
+        "Вы получите уведомление, когда он ответит."
+    )
+    
+    # Отправляем уведомление собеседующему
+    try:
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(
+            text="💬 Ответить на вопрос",
+            callback_data=f"answer_question:{message_db_id}"
+        ))
+        
+        await message.bot.send_message(
+            interviewer.telegram_id,
+            f"❓ Новый вопрос от кандидата:\n\n"
+            f"<b>Вопрос:</b>\n{question_text}\n\n"
+            f"Нажмите кнопку ниже, чтобы ответить.",
+            parse_mode="HTML",
+            reply_markup=kb.as_markup()
+        )
+    except Exception as e:
+        print(f"Ошибка отправки уведомления собеседующему: {e}")
+
+
+@interview_router.callback_query(F.data.startswith('answer_question:'))
+async def answer_question_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка кнопки 'Ответить на вопрос' от собеседующего."""
+    message_id = int(callback.data.split(':')[1])
+    tg_id = callback.from_user.id
+    
+    async with async_session_maker() as session:
+        # Проверяем что сообщение существует и адресовано этому собеседующему
+        stmt = select(InterviewMessage).where(
+            InterviewMessage.id == message_id,
+            InterviewMessage.to_user_id == tg_id
+        )
+        result = await session.execute(stmt)
+        msg = result.scalars().first()
+        
+        if not msg:
+            await callback.answer("❌ Сообщение не найдено", show_alert=True)
+            return
+        
+        # Помечаем как прочитанное
+        msg.is_read = True
+        await session.commit()
+    
+    # Сохраняем message_id в state
+    await state.update_data(message_id=message_id, question_text=msg.message_text)
+    await state.set_state(QuestionStates.waiting_answer)
+    
+    await callback.message.edit_text(
+        f"❓ Вопрос от кандидата:\n\n"
+        f"<i>{msg.message_text}</i>\n\n"
+        f"📝 Напишите ваш ответ в следующем сообщении:",
+        parse_mode="HTML"
+    )
+    
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
+@interview_router.message(QuestionStates.waiting_answer)
+async def process_answer(message: types.Message, state: FSMContext):
+    """Обработка ответа от собеседующего."""
+    answer_text = message.text.strip()
+    
+    if not answer_text:
+        await message.answer("❌ Ответ не может быть пустым. Попробуйте снова:")
+        return
+    
+    if len(answer_text) > 1000:
+        await message.answer("❌ Ответ слишком длинный (максимум 1000 символов). Сократите текст:")
+        return
+    
+    data = await state.get_data()
+    original_message_id = data.get('message_id')
+    question_text = data.get('question_text')
+    tg_id = message.from_user.id
+    
+    async with async_session_maker() as session:
+        # Получаем оригинальное сообщение
+        stmt = select(InterviewMessage).where(InterviewMessage.id == original_message_id)
+        result = await session.execute(stmt)
+        original_msg = result.scalars().first()
+        
+        if not original_msg:
+            await message.answer("❌ Сообщение не найдено")
+            await state.clear()
+            return
+        
+        # Сохраняем ответ в БД
+        answer_message = InterviewMessage(
+            interview_id=original_msg.interview_id,
+            from_user_id=tg_id,
+            to_user_id=original_msg.from_user_id,
+            message_text=answer_text,
+            is_read=False
+        )
+        session.add(answer_message)
+        await session.commit()
+    
+    await state.clear()
+    await message.answer(
+        "✅ Ваш ответ отправлен кандидату!\n\n"
+        "Кандидат получит уведомление с вашим ответом."
+    )
+    
+    # Отправляем уведомление кандидату
+    try:
+        await message.bot.send_message(
+            original_msg.from_user_id,
+            f"💬 Ответ от собеседующего:\n\n"
+            f"<b>Ваш вопрос:</b>\n<i>{question_text}</i>\n\n"
+            f"<b>Ответ:</b>\n{answer_text}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Ошибка отправки ответа кандидату: {e}")
+
+
+@interview_router.message(Command('my_interviews'))
+async def my_interviews_command(message: types.Message):
+    """Показать список записей (для собеседующего)."""
+    tg_id = message.from_user.id
+    
+    async with async_session_maker() as session:
+        # Проверяем, является ли пользователь собеседующим
+        stmt = select(Interviewer).where(Interviewer.telegram_id == tg_id)
+        result = await session.execute(stmt)
+        interviewer = result.scalars().first()
+        
+        if not interviewer:
+            await message.answer(
+                "❌ Вы не зарегистрированы как собеседующий.\n\n"
+                "Используйте /register_sobes для регистрации."
+            )
+            return
+        
+        # Получаем все записи собеседующего
+        stmt = select(Interview).where(
+            Interview.interviewer_id == interviewer.id,
+            Interview.status.in_(['confirmed', 'pending'])
+        ).join(TimeSlot).order_by(TimeSlot.date, TimeSlot.time_start)
+        result = await session.execute(stmt)
+        interviews = result.scalars().all()
+        
+        if not interviews:
+            await message.answer(
+                "📋 У вас пока нет записей на собеседования.\n\n"
+                "Когда кандидаты начнут записываться, вы увидите их здесь."
+            )
+            return
+        
+        # Группируем по датам
+        from collections import defaultdict
+        by_date = defaultdict(list)
+        
+        for interview in interviews:
+            # Получаем слот
+            stmt = select(TimeSlot).where(TimeSlot.id == interview.time_slot_id)
+            result = await session.execute(stmt)
+            slot = result.scalars().first()
+            
+            # Получаем кандидата
+            stmt = select(BotUser).where(BotUser.id == interview.bot_user_id)
+            result = await session.execute(stmt)
+            bot_user = result.scalars().first()
+            
+            # Получаем Person если есть
+            person_name = "Не указано"
+            if interview.person_id:
+                stmt = select(Person).where(Person.id == interview.person_id)
+                result = await session.execute(stmt)
+                person = result.scalars().first()
+                if person:
+                    person_name = person.full_name
+            
+            by_date[slot.date].append({
+                'time': f"{slot.time_start}-{slot.time_end}",
+                'candidate': person_name,
+                'faculty': interview.faculty or "Не указан",
+                'username': f"@{bot_user.telegram_username}" if bot_user.telegram_username else "Нет username"
+            })
+        
+        # Формируем текст
+        text = f"📋 <b>Ваши записи на собеседования</b>\n\n"
+        
+        for date in sorted(by_date.keys()):
+            text += f"📅 <b>{date}</b>\n"
+            for interview in by_date[date]:
+                text += (
+                    f"  🕐 {interview['time']}\n"
+                    f"     👤 {interview['candidate']}\n"
+                    f"     🎓 {interview['faculty']}\n"
+                    f"     📱 {interview['username']}\n\n"
+                )
+        
+        text += f"<b>Всего записей:</b> {len(interviews)}"
+        
+        await message.answer(text, parse_mode="HTML")
 
