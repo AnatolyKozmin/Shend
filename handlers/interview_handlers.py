@@ -642,12 +642,10 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
             # Отправляем уведомление собеседующему
             if interviewer and interviewer.telegram_id:
                 try:
-                    from aiogram import Bot
-                    bot = Bot(token=callback.bot.token)
-                    
                     student_name = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.full_name
                     
-                    await bot.send_message(
+                    # Используем существующий bot вместо создания нового
+                    await callback.bot.send_message(
                         interviewer.telegram_id,
                         f"📌 Новая запись на собеседование!\n\n"
                         f"👤 Кандидат: {student_name}\n"
@@ -673,4 +671,139 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
                 "Попробуйте позже или обратитесь к администратору."
             )
             await state.clear()
+
+
+@interview_router.callback_query(F.data.startswith('cancel_interview:'))
+async def cancel_interview_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка отмены записи на собеседование."""
+    _, interview_id = callback.data.split(':', 1)
+    interview_id = int(interview_id)
+    
+    tg_id = callback.from_user.id
+    
+    async with async_session_maker() as session:
+        try:
+            # Получаем запись
+            interview_stmt = select(Interview).where(Interview.id == interview_id)
+            interview_result = await session.execute(interview_stmt)
+            interview = interview_result.scalars().first()
+            
+            if not interview:
+                await callback.message.edit_text("❌ Запись не найдена.")
+                try:
+                    await callback.answer()
+                except TelegramBadRequest:
+                    pass
+                return
+            
+            # Проверяем что это запись этого пользователя
+            bot_user_stmt = select(BotUser).where(BotUser.tg_id == tg_id)
+            bot_user_result = await session.execute(bot_user_stmt)
+            bot_user = bot_user_result.scalars().first()
+            
+            if not bot_user or interview.bot_user_id != bot_user.id:
+                await callback.message.edit_text("❌ Это не ваша запись.")
+                try:
+                    await callback.answer()
+                except TelegramBadRequest:
+                    pass
+                return
+            
+            # Проверяем можно ли отменить
+            if not interview.cancellation_allowed:
+                await callback.message.edit_text(
+                    "❌ Отмена записи больше недоступна.\n\n"
+                    "Вы уже использовали возможность отмены.\n"
+                    "Обратитесь к администратору для помощи."
+                )
+                try:
+                    await callback.answer()
+                except TelegramBadRequest:
+                    pass
+                return
+            
+            # Получаем слот
+            slot_stmt = select(TimeSlot).where(TimeSlot.id == interview.time_slot_id)
+            slot_result = await session.execute(slot_stmt)
+            slot = slot_result.scalars().first()
+            
+            # Освобождаем слот
+            if slot:
+                slot.is_available = True
+                session.add(slot)
+            
+            # Помечаем запись как отменённую
+            interview.status = 'cancelled'
+            interview.cancelled_at = datetime.now()
+            interview.cancellation_allowed = False  # Больше нельзя отменять
+            
+            session.add(interview)
+            await session.commit()
+            
+            # Уведомляем собеседующего об отмене
+            interviewer_stmt = select(Interviewer).where(Interviewer.id == interview.interviewer_id)
+            interviewer_result = await session.execute(interviewer_stmt)
+            interviewer = interviewer_result.scalars().first()
+            
+            if interviewer and interviewer.telegram_id:
+                try:
+                    student_name = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.full_name
+                    
+                    # Форматируем дату
+                    if slot:
+                        date_parts = slot.date.split('-')
+                        date_display = f"{date_parts[2]}.{date_parts[1]}.{date_parts[0]}"
+                        time_display = f"{slot.time_start}-{slot.time_end}"
+                    else:
+                        date_display = "N/A"
+                        time_display = "N/A"
+                    
+                    await callback.bot.send_message(
+                        interviewer.telegram_id,
+                        f"❌ Запись отменена\n\n"
+                        f"👤 Кандидат: {student_name}\n"
+                        f"🎓 Факультет: {interview.faculty}\n"
+                        f"📅 Дата: {date_display}\n"
+                        f"⏰ Время: {time_display}\n\n"
+                        f"Слот снова доступен для записи."
+                    )
+                except Exception as e:
+                    print(f"Ошибка отправки уведомления об отмене: {e}")
+            
+            await callback.message.edit_text(
+                "✅ Запись успешно отменена.\n\n"
+                "Вы можете записаться на другое время через /sobes\n\n"
+                "⚠️ Обратите внимание: отменить запись можно только один раз.\n"
+                "При следующей записи отменить её будет нельзя."
+            )
+            
+            try:
+                await callback.answer("✅ Запись отменена")
+            except TelegramBadRequest:
+                pass
+        
+        except Exception as e:
+            print(f"Ошибка при отмене записи: {e}")
+            await callback.message.edit_text(
+                "❌ Произошла ошибка при отмене записи.\n\n"
+                "Попробуйте позже или обратитесь к администратору."
+            )
+            try:
+                await callback.answer()
+            except TelegramBadRequest:
+                pass
+
+
+@interview_router.callback_query(F.data.startswith('ask_question:'))
+async def ask_question_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка кнопки 'Задать вопрос' (заглушка)."""
+    await callback.message.edit_text(
+        "📝 Функция отправки вопросов собеседующему в разработке.\n\n"
+        "Пока вы можете связаться с администратором для передачи вопроса."
+    )
+    
+    try:
+        await callback.answer("В разработке")
+    except TelegramBadRequest:
+        pass
 
