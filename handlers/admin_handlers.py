@@ -329,6 +329,7 @@ async def handle_answer(callback: types.CallbackQuery):
 async def get_stats(message: types.Message):
     """Отчёт по всем факультетам: количество получателей и уникальные ответы Да/Нет."""
     if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
         return
 
     async with async_session_maker() as session:
@@ -910,6 +911,7 @@ async def get_reserv_stats(message: types.Message):
 async def stats_res(message: types.Message):
     """Краткая статистика: кто ответил Да/Нет с ФИО и телеграмами."""
     if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
         return
     
     async with async_session_maker() as session:
@@ -921,6 +923,8 @@ async def stats_res(message: types.Message):
         if not faculties:
             await message.answer('В таблице Reserv нет данных.')
             return
+        
+        has_answers = False  # Флаг для проверки наличия ответов
         
         for faculty in sorted(faculties):
             # Получаем тех, кто ответил "Да"
@@ -942,6 +946,7 @@ async def stats_res(message: types.Message):
             if not yes_users and not no_users:
                 continue  # Пропускаем факультеты без ответов
             
+            has_answers = True  # Есть хотя бы один ответ
             text = f"🎓 {faculty}\n\n"
             
             if yes_users:
@@ -999,4 +1004,8 @@ async def stats_res(message: types.Message):
                         await message.answer(no_text)
             else:
                 await message.answer(text)
+        
+        # Если ни в одном факультете нет ответов
+        if not has_answers:
+            await message.answer('❌ Пока нет ответов на рассылки из Reserv.')
 

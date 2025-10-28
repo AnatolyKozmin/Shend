@@ -8,8 +8,12 @@ from db.engine import async_session_maker
 from db.models import Reserv
 
 
-async def load_reserv_from_excel():
-    """Загружает данные из res.xlsx в таблицу Reserv."""
+async def load_reserv_from_excel(update_existing=False):
+    """Загружает данные из res.xlsx в таблицу Reserv.
+    
+    Args:
+        update_existing: Если True, обновляет существующие записи вместо пропуска
+    """
     
     # Читаем Excel файл
     try:
@@ -73,16 +77,40 @@ async def load_reserv_from_excel():
                 # Курс - опциональная колонка (может не быть)
                 course = None  # В res.xlsx нет колонки курс
                 
-                # Проверяем, есть ли уже такая запись
+                # Проверяем, есть ли уже такая запись по telegram_username ИЛИ по ФИО
+                existing = None
+                
+                # Проверка по telegram_username (если есть)
                 if telegram_username:
                     stmt = select(Reserv).where(Reserv.telegram_username == telegram_username)
                     result = await session.execute(stmt)
                     existing = result.scalars().first()
                     
                     if existing:
-                        print(f"⚠️ Строка {index + 2}: пользователь @{telegram_username} уже существует, пропускаем")
+                        print(f"⚠️ Строка {index + 2}: пользователь с telegram @{telegram_username} уже существует, пропускаем")
                         skipped += 1
                         continue
+                
+                # Проверка по ФИО (если username не было или не нашли)
+                if not existing:
+                    stmt_name = select(Reserv).where(Reserv.full_name == str(full_name).strip())
+                    result_name = await session.execute(stmt_name)
+                    existing = result_name.scalars().first()
+                    
+                    if existing:
+                        if update_existing:
+                            # Обновляем существующую запись
+                            print(f"🔄 Строка {index + 2}: обновляю существующую запись для '{full_name}'")
+                            existing.faculty = str(faculty).strip() if faculty else None
+                            existing.telegram_username = telegram_username
+                            existing.course = str(course).strip() if course else None
+                            session.add(existing)
+                            added += 1
+                            continue
+                        else:
+                            print(f"⚠️ Строка {index + 2}: пользователь с ФИО '{full_name}' уже существует, пропускаем")
+                            skipped += 1
+                            continue
                 
                 # Создаём новую запись
                 reserv = Reserv(
@@ -113,6 +141,18 @@ async def load_reserv_from_excel():
 
 
 if __name__ == '__main__':
-    print("🚀 Запуск загрузки данных из res.xlsx в таблицу Reserv...")
-    asyncio.run(load_reserv_from_excel())
+    import sys
+    
+    # Проверяем аргументы командной строки
+    update_mode = '--update' in sys.argv or '-u' in sys.argv
+    
+    if update_mode:
+        print("🚀 Запуск загрузки данных из res.xlsx в таблицу Reserv (режим обновления)...")
+        print("💡 Существующие записи будут обновлены")
+    else:
+        print("🚀 Запуск загрузки данных из res.xlsx в таблицу Reserv...")
+        print("💡 Существующие записи будут пропущены")
+        print("💡 Для обновления используйте: python scripts/load_reserv.py --update")
+    
+    asyncio.run(load_reserv_from_excel(update_existing=update_mode))
 
