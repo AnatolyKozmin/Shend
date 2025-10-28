@@ -376,15 +376,15 @@ async def sobes_start(message: types.Message, state: FSMContext):
             slot = slot_result.scalars().first()
             
             kb = InlineKeyboardBuilder()
-            if existing_interview.cancellation_allowed:
-                kb.row(InlineKeyboardButton(text="❌ Отменить запись", callback_data=f"cancel_interview:{existing_interview.id}"))
             kb.row(InlineKeyboardButton(text="❓ Задать вопрос собеседующему", callback_data=f"ask_question:{existing_interview.id}"))
             
             await message.answer(
                 f"⚠️ У вас уже есть запись на собеседование!\n\n"
                 f"📅 Дата: {slot.date}\n"
                 f"⏰ Время: {slot.time_start} - {slot.time_end}\n"
-                f"🎓 Факультет: {existing_interview.faculty}\n",
+                f"🎓 Факультет: {existing_interview.faculty}\n\n"
+                f"❗️ Записаться можно только один раз.\n"
+                f"Для изменения времени обратитесь к администратору.",
                 reply_markup=kb.as_markup()
             )
             return
@@ -690,15 +690,14 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
             # Кнопки для кандидата
             kb = InlineKeyboardBuilder()
             kb.row(InlineKeyboardButton(text="❓ Задать вопрос", callback_data=f"ask_question:{interview.id}"))
-            kb.row(InlineKeyboardButton(text="❌ Отменить запись", callback_data=f"cancel_interview:{interview.id}"))
             
             await callback.message.edit_text(
                 f"🎉 Вы успешно записаны на собеседование!\n\n"
                 f"🎓 Факультет: {user_faculty}\n"
                 f"📅 Дата: {date_display}\n"
                 f"⏰ Время: {selected_time}\n\n"
-                f"❗ Отменить запись можно только один раз.\n"
-                f"Будьте внимательны!",
+                f"❗️ Записаться можно только один раз.\n"
+                f"Для изменения времени обратитесь к администратору.",
                 reply_markup=kb.as_markup()
             )
             
