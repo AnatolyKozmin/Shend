@@ -337,7 +337,7 @@ async def sobes_start(message: types.Message, state: FSMContext):
     
     async with async_session_maker() as session:
         # Получаем BotUser
-        stmt = select(BotUser).where(BotUser.telegram_id == tg_id)
+        stmt = select(BotUser).where(BotUser.tg_id == tg_id)
         result = await session.execute(stmt)
         bot_user = result.scalars().first()
         
@@ -642,7 +642,7 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
     async with async_session_maker() as session:
         try:
             # Получаем BotUser
-            bot_user_stmt = select(BotUser).where(BotUser.telegram_id == tg_id)
+            bot_user_stmt = select(BotUser).where(BotUser.tg_id == tg_id)
             bot_user_result = await session.execute(bot_user_stmt)
             bot_user = bot_user_result.scalars().first()
             
