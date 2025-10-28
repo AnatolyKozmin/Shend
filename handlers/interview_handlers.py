@@ -653,11 +653,13 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
             )
             
             # Блокируем слот
+            print(f"🔒 Блокирую слот {slot.id}: is_available={slot.is_available} -> False")
             slot.is_available = False
             
             session.add(interview)
             session.add(slot)
             await session.commit()
+            print(f"✅ Запись создана, slot_id={slot.id}, interview_id={interview.id}")
             
             # Получаем собеседующего для уведомления
             interviewer_stmt = select(Interviewer).where(Interviewer.id == slot.interviewer_id)
@@ -773,8 +775,11 @@ async def cancel_interview_callback(callback: types.CallbackQuery, state: FSMCon
             
             # Освобождаем слот
             if slot:
+                print(f"🔓 Освобождаю слот {slot.id}: is_available={slot.is_available} -> True")
                 slot.is_available = True
                 session.add(slot)
+            else:
+                print(f"⚠️ Слот не найден для interview {interview.id}, time_slot_id={interview.time_slot_id}")
             
             # Помечаем запись как отменённую
             interview.status = 'cancelled'
@@ -783,6 +788,7 @@ async def cancel_interview_callback(callback: types.CallbackQuery, state: FSMCon
             
             session.add(interview)
             await session.commit()
+            print(f"✅ Отмена записи {interview.id} завершена, слот {interview.time_slot_id} освобождён")
             
             # Уведомляем собеседующего об отмене
             interviewer_stmt = select(Interviewer).where(Interviewer.id == interview.interviewer_id)
