@@ -19,8 +19,17 @@ def get_google_sheets_client():
     ]
     
     # Используем JSON файл с credentials
+    # Проверяем оба возможных имени файла
+    import os
+    if os.path.exists('sha-otbor-476513-9c6d0a1d252c.json'):
+        credentials_file = 'sha-otbor-476513-9c6d0a1d252c.json'
+    elif os.path.exists('credentials.json'):
+        credentials_file = 'credentials.json'
+    else:
+        raise FileNotFoundError("Не найден файл credentials (sha-otbor-476513-9c6d0a1d252c.json или credentials.json)")
+    
     creds = Credentials.from_service_account_file(
-        'sha-otbor-476513-9c6d0a1d252c.json',
+        credentials_file,
         scopes=scope
     )
     
