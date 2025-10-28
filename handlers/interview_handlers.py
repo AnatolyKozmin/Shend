@@ -4,6 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select
 from db.engine import async_session_maker
 from db.models import Interviewer, BotUser, TimeSlot
@@ -42,7 +43,7 @@ async def register_sobes_start(message: types.Message, state: FSMContext):
     await state.set_state(RegisterSobesStates.waiting_code)
     await message.answer(
         "🔐 Регистрация собеседующего\n\n"
-        "Введите ваш код доступа (5 цифр):"
+        "Введите ваш код доступа (5 символов):"
     )
 
 
@@ -51,11 +52,19 @@ async def register_sobes_code(message: types.Message, state: FSMContext):
     """Обработка ввода кода доступа."""
     code = message.text.strip()
     
-    # Проверяем формат кода
-    if not code.isdigit() or len(code) != 5:
+    # Проверяем что код не пустой
+    if not code:
+        await message.answer(
+            "❌ Код не может быть пустым.\n\n"
+            "Введите ваш код доступа:"
+        )
+        return
+    
+    # Проверяем длину кода (должен быть ровно 5 символов)
+    if len(code) != 5:
         await message.answer(
             "❌ Неверный формат кода.\n\n"
-            "Код должен состоять из 5 цифр. Попробуйте снова:"
+            "Код должен состоять из 5 символов. Попробуйте снова:"
         )
         return
     
@@ -114,7 +123,10 @@ async def confirm_interviewer(callback: types.CallbackQuery, state: FSMContext):
             "Используйте /register_sobes чтобы попробовать снова."
         )
         await state.clear()
-        await callback.answer()
+        try:
+            await callback.answer()
+        except TelegramBadRequest:
+            pass  # Игнорируем ошибку "query too old"
         return
     
     # Получаем данные из state
@@ -141,7 +153,10 @@ async def confirm_interviewer(callback: types.CallbackQuery, state: FSMContext):
                     f"ФИО: {existing.full_name}"
                 )
                 await state.clear()
-                await callback.answer()
+                try:
+                    await callback.answer()
+                except TelegramBadRequest:
+                    pass  # Игнорируем ошибку "query too old"
                 return
             
             # Создаём нового собеседующего
@@ -167,7 +182,10 @@ async def confirm_interviewer(callback: types.CallbackQuery, state: FSMContext):
             )
             
             await state.clear()
-            await callback.answer("✅ Регистрация завершена!")
+            try:
+                await callback.answer("✅ Регистрация завершена!")
+            except TelegramBadRequest:
+                pass  # Игнорируем ошибку "query too old"
         
         except Exception as e:
             print(f"Ошибка при сохранении собеседующего: {e}")
@@ -176,7 +194,10 @@ async def confirm_interviewer(callback: types.CallbackQuery, state: FSMContext):
                 "Попробуйте позже или обратитесь к администратору."
             )
             await state.clear()
-            await callback.answer()
+            try:
+                await callback.answer()
+            except TelegramBadRequest:
+                pass  # Игнорируем ошибку "query too old"
 
 
 @interview_router.message(Command('cancel'))

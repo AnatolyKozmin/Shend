@@ -5,6 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters.state import StateFilter
+from aiogram.exceptions import TelegramBadRequest
 import asyncio
 from sqlalchemy import select, func
 from db.engine import async_session_maker
@@ -825,7 +826,10 @@ async def handle_reserv_answer(callback: types.CallbackQuery):
     except Exception:
         pass
 
-    await callback.answer('Ваш ответ сохранён. Спасибо!')
+    try:
+        await callback.answer('Ваш ответ сохранён. Спасибо!')
+    except TelegramBadRequest:
+        pass  # Игнорируем ошибку "query too old"
 
 
 @admin_router.message(Command(commands=['get_reserv_stats']))

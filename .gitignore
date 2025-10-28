@@ -1,3 +1,5 @@
 venv
 .env
 credentials.json
+sha-otbor-476513-9c6d0a1d252c.json
+*.json
