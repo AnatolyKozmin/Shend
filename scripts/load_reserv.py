@@ -13,7 +13,15 @@ async def load_reserv_from_excel():
     
     # Читаем Excel файл
     try:
+        # Пробуем прочитать с заголовками
         df = pd.read_excel('res.xlsx')
+        
+        # Проверяем, есть ли правильные заголовки
+        if 'ФИО' not in df.columns and 'Факультет' not in df.columns:
+            # Если заголовков нет, читаем заново без заголовков
+            print("⚠️ Заголовки не найдены, читаю без заголовков...")
+            df = pd.read_excel('res.xlsx', header=None, names=['ФИО', 'Факультет', 'telegram_username'])
+        
         print(f"Прочитано {len(df)} строк из res.xlsx")
         print(f"Колонки: {df.columns.tolist()}")
     except FileNotFoundError:
