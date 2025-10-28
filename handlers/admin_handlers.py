@@ -777,3 +777,131 @@ async def dodep_reserv_send(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
+
+@admin_router.callback_query(lambda c: c.data and c.data.startswith('reserv_answer:'))
+async def handle_reserv_answer(callback: types.CallbackQuery):
+    """Обработка ответов Да/Нет на рассылки из Reserv."""
+    try:
+        _, answer = callback.data.split(':', 1)
+    except Exception:
+        await callback.answer()
+        return
+
+    tg_id = callback.from_user.id
+
+    async with async_session_maker() as session:
+        # Найти bot_user
+        stmt = select(BotUser).where(BotUser.tg_id == tg_id)
+        res = await session.execute(stmt)
+        bot_user = res.scalars().first()
+        
+        if not bot_user:
+            await callback.answer('Ваша учётная запись не связана с базой.', show_alert=True)
+            return
+
+        # Найти соответствующую запись в Reserv по telegram_username
+        if bot_user.telegram_username:
+            username_lower = bot_user.telegram_username.lower()
+            reserv_stmt = select(Reserv).where(
+                func.lower(Reserv.telegram_username) == username_lower
+            )
+            reserv_result = await session.execute(reserv_stmt)
+            reserv_record = reserv_result.scalars().first()
+            
+            if reserv_record:
+                # Сохраняем ответ в базу
+                reserv_record.last_answer = answer
+                from datetime import datetime
+                reserv_record.answered_at = datetime.now()
+                session.add(reserv_record)
+                await session.commit()
+                print(f"✅ Ответ сохранён: {bot_user.telegram_username} ({reserv_record.full_name}) → {answer}")
+
+    # Редактируем сообщение, убираем кнопки
+    try:
+        answer_text = "Да ✅" if answer == "yes" else "Нет ❌"
+        await callback.message.edit_text(f'{callback.message.text}\n\n→ Ваш ответ: {answer_text}')
+    except Exception:
+        pass
+
+    await callback.answer('Ваш ответ сохранён. Спасибо!')
+
+
+@admin_router.message(Command(commands=['get_reserv_stats']))
+async def get_reserv_stats(message: types.Message):
+    """Статистика ответов из рассылок Reserv по факультетам."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    async with async_session_maker() as session:
+        # Получаем уникальные факультеты
+        stmt = select(Reserv.faculty).distinct()
+        res = await session.execute(stmt)
+        faculties = [row[0] for row in res.all() if row[0]]
+        
+        if not faculties:
+            await message.answer('В таблице Reserv нет данных.')
+            return
+        
+        for faculty in sorted(faculties):
+            # Статистика по факультету
+            total_stmt = select(func.count(Reserv.id)).where(Reserv.faculty == faculty)
+            total_res = await session.execute(total_stmt)
+            total = total_res.scalar() or 0
+            
+            sent_stmt = select(func.count(Reserv.id)).where(
+                Reserv.faculty == faculty,
+                Reserv.message_sent == True
+            )
+            sent_res = await session.execute(sent_stmt)
+            sent = sent_res.scalar() or 0
+            
+            yes_stmt = select(func.count(Reserv.id)).where(
+                Reserv.faculty == faculty,
+                Reserv.last_answer == 'yes'
+            )
+            yes_res = await session.execute(yes_stmt)
+            yes_count = yes_res.scalar() or 0
+            
+            no_stmt = select(func.count(Reserv.id)).where(
+                Reserv.faculty == faculty,
+                Reserv.last_answer == 'no'
+            )
+            no_res = await session.execute(no_stmt)
+            no_count = no_res.scalar() or 0
+            
+            # Списки ФИО ответивших
+            yes_names_stmt = select(Reserv.full_name).where(
+                Reserv.faculty == faculty,
+                Reserv.last_answer == 'yes'
+            )
+            yes_names_res = await session.execute(yes_names_stmt)
+            yes_names = [r[0] for r in yes_names_res.fetchall()]
+            
+            no_names_stmt = select(Reserv.full_name).where(
+                Reserv.faculty == faculty,
+                Reserv.last_answer == 'no'
+            )
+            no_names_res = await session.execute(no_names_stmt)
+            no_names = [r[0] for r in no_names_res.fetchall()]
+            
+            text = (
+                f"📊 Факультет: {faculty}\n\n"
+                f"📋 Всего в Reserv: {total} чел.\n"
+                f"📤 Отправлено рассылок: {sent} чел.\n"
+                f"📊 Ответы:\n"
+                f"   ✅ Да: {yes_count} чел.\n"
+                f"   ❌ Нет: {no_count} чел.\n"
+                f"   ⏳ Не ответили: {sent - yes_count - no_count} чел."
+            )
+            
+            if yes_names:
+                text += '\n\n✅ Ответили "Да":\n' + '\n'.join(f"• {name}" for name in yes_names)
+            
+            if no_names:
+                text += '\n\n❌ Ответили "Нет":\n' + '\n'.join(f"• {name}" for name in no_names)
+            
+            text += '\n\n' + '─' * 30
+            
+            await message.answer(text)
+

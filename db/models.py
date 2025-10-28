@@ -82,6 +82,8 @@ class Reserv(Base):
 	faculty = Column(String(255), nullable=True)
 	telegram_username = Column(String(64), nullable=True)
 	message_sent = Column(Boolean, default=False)  # флаг отправки сообщения
+	last_answer = Column(String(16), nullable=True)  # последний ответ: 'yes' / 'no'
+	answered_at = Column(DateTime(timezone=True), nullable=True)  # время ответа
 	created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 	def __repr__(self) -> str:  # pragma: no cover - simple repr
