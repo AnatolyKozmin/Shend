@@ -650,12 +650,13 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
             cancelled_interviews_result = await session.execute(cancelled_interviews_stmt)
             cancelled_interviews = cancelled_interviews_result.scalars().all()
             
-            for cancelled in cancelled_interviews:
-                print(f"🗑️ Удаляю отменённую запись {cancelled.id} для слота {selected_slot_id}")
-                session.delete(cancelled)
-            
             if cancelled_interviews:
-                await session.flush()  # Применяем удаление перед вставкой
+                for cancelled in cancelled_interviews:
+                    print(f"🗑️ Удаляю отменённую запись {cancelled.id} для слота {selected_slot_id}")
+                    session.delete(cancelled)
+                
+                await session.flush()  # Применяем удаление ПРЯМО СЕЙЧАС
+                print(f"✅ Удалено {len(cancelled_interviews)} отменённых записей для слота {selected_slot_id}")
             
             # Создаём запись
             interview = Interview(
