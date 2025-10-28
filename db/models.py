@@ -88,3 +88,93 @@ class Reserv(Base):
 
 	def __repr__(self) -> str:  # pragma: no cover - simple repr
 		return f"<Reserv(id={self.id!r}, full_name={self.full_name!r}, telegram={self.telegram_username!r})>"
+
+
+class Interviewer(Base):
+	"""Собеседующие - те, кто проводит собеседования."""
+	__tablename__ = 'interviewers'
+
+	id = Column(Integer, primary_key=True, index=True)
+	full_name = Column(String(255), nullable=False)
+	telegram_id = Column(BigInteger, nullable=False, unique=True)
+	telegram_username = Column(String(64), nullable=True)
+	interviewer_sheet_id = Column(String(64), nullable=True)  # ID из Google Sheets (колонка C)
+	access_code = Column(String(10), nullable=True)  # Код доступа из Google Sheets (колонка B)
+	faculties = Column(String(500), nullable=True)  # Список факультетов через запятую
+	is_active = Column(Boolean, default=True)
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	# Связи
+	time_slots = relationship('TimeSlot', back_populates='interviewer')
+	interviews = relationship('Interview', back_populates='interviewer')
+
+	def __repr__(self) -> str:
+		return f"<Interviewer(id={self.id!r}, full_name={self.full_name!r}, tg_id={self.telegram_id!r})>"
+
+
+class TimeSlot(Base):
+	"""Временные слоты для собеседований."""
+	__tablename__ = 'time_slots'
+
+	id = Column(Integer, primary_key=True, index=True)
+	interviewer_id = Column(Integer, ForeignKey('interviewers.id'), nullable=False)
+	date = Column(String(10), nullable=False)  # Формат: YYYY-MM-DD
+	time_start = Column(String(5), nullable=False)  # Формат: HH:MM
+	time_end = Column(String(5), nullable=False)  # Формат: HH:MM
+	is_available = Column(Boolean, default=True)
+	google_sheet_sync = Column(DateTime(timezone=True), nullable=True)  # Последняя синхронизация
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	# Связи
+	interviewer = relationship('Interviewer', back_populates='time_slots')
+	interview = relationship('Interview', back_populates='time_slot', uselist=False)
+
+	def __repr__(self) -> str:
+		return f"<TimeSlot(id={self.id!r}, date={self.date!r}, time={self.time_start}-{self.time_end}, available={self.is_available!r})>"
+
+
+class Interview(Base):
+	"""Записи на собеседования."""
+	__tablename__ = 'interviews'
+
+	id = Column(Integer, primary_key=True, index=True)
+	time_slot_id = Column(Integer, ForeignKey('time_slots.id'), nullable=False, unique=True)
+	interviewer_id = Column(Integer, ForeignKey('interviewers.id'), nullable=False)
+	bot_user_id = Column(Integer, ForeignKey('bot_users.id'), nullable=False)
+	person_id = Column(Integer, ForeignKey('people.id'), nullable=True)
+	faculty = Column(String(255), nullable=True)
+	status = Column(String(20), default='pending')  # pending/confirmed/cancelled
+	cancellation_allowed = Column(Boolean, default=True)  # Можно ли отменить
+	cancelled_at = Column(DateTime(timezone=True), nullable=True)
+	notes = Column(String(1000), nullable=True)
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	# Связи
+	time_slot = relationship('TimeSlot', back_populates='interview')
+	interviewer = relationship('Interviewer', back_populates='interviews')
+	bot_user = relationship('BotUser')
+	person = relationship('Person')
+	messages = relationship('InterviewMessage', back_populates='interview')
+
+	def __repr__(self) -> str:
+		return f"<Interview(id={self.id!r}, status={self.status!r})>"
+
+
+class InterviewMessage(Base):
+	"""Сообщения между студентом и собеседующим."""
+	__tablename__ = 'interview_messages'
+
+	id = Column(Integer, primary_key=True, index=True)
+	interview_id = Column(Integer, ForeignKey('interviews.id'), nullable=False)
+	from_user_id = Column(BigInteger, nullable=False)  # tg_id отправителя
+	to_user_id = Column(BigInteger, nullable=False)  # tg_id получателя
+	message_text = Column(String(4000), nullable=False)
+	message_id = Column(BigInteger, nullable=True)  # ID сообщения в Telegram
+	is_read = Column(Boolean, default=False)
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	# Связи
+	interview = relationship('Interview', back_populates='messages')
+
+	def __repr__(self) -> str:
+		return f"<InterviewMessage(id={self.id!r}, from={self.from_user_id!r}, to={self.to_user_id!r})>"

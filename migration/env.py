@@ -11,7 +11,7 @@ from alembic import context
 from dotenv import load_dotenv
 load_dotenv()
 from db.engine import Base
-from db.models import Person, BotUser, CO, COResponse, Reserv
+from db.models import Person, BotUser, CO, COResponse, Reserv, Interviewer, TimeSlot, Interview, InterviewMessage
 
 config = context.config
 

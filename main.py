@@ -4,6 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from handlers.user_handlers import user_router
 from handlers.admin_handlers import admin_router
+from handlers.interview_handlers import interview_router
 
 
 from dotenv import load_dotenv
@@ -16,6 +17,7 @@ dp = Dispatcher(storage=storage)
 
 dp.include_router(user_router)
 dp.include_router(admin_router)
+dp.include_router(interview_router)
 
 
 async def main():
