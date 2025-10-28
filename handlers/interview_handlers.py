@@ -641,6 +641,22 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
                     pass
                 return
             
+            # Удаляем старые отменённые записи на этот слот (чтобы не нарушать UNIQUE constraint)
+            # Это нужно потому что у нас UNIQUE constraint на time_slot_id, а не на (time_slot_id, status)
+            cancelled_interviews_stmt = select(Interview).where(
+                Interview.time_slot_id == selected_slot_id,
+                Interview.status == 'cancelled'
+            )
+            cancelled_interviews_result = await session.execute(cancelled_interviews_stmt)
+            cancelled_interviews = cancelled_interviews_result.scalars().all()
+            
+            for cancelled in cancelled_interviews:
+                print(f"🗑️ Удаляю отменённую запись {cancelled.id} для слота {selected_slot_id}")
+                session.delete(cancelled)
+            
+            if cancelled_interviews:
+                await session.flush()  # Применяем удаление перед вставкой
+            
             # Создаём запись
             interview = Interview(
                 time_slot_id=slot.id,
