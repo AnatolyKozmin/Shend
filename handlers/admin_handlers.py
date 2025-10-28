@@ -905,3 +905,98 @@ async def get_reserv_stats(message: types.Message):
             
             await message.answer(text)
 
+
+@admin_router.message(Command(commands=['stats_res']))
+async def stats_res(message: types.Message):
+    """Краткая статистика: кто ответил Да/Нет с ФИО и телеграмами."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    async with async_session_maker() as session:
+        # Получаем уникальные факультеты
+        stmt = select(Reserv.faculty).distinct()
+        res = await session.execute(stmt)
+        faculties = [row[0] for row in res.all() if row[0]]
+        
+        if not faculties:
+            await message.answer('В таблице Reserv нет данных.')
+            return
+        
+        for faculty in sorted(faculties):
+            # Получаем тех, кто ответил "Да"
+            yes_stmt = select(Reserv.full_name, Reserv.telegram_username).where(
+                Reserv.faculty == faculty,
+                Reserv.last_answer == 'yes'
+            ).order_by(Reserv.full_name)
+            yes_result = await session.execute(yes_stmt)
+            yes_users = yes_result.fetchall()
+            
+            # Получаем тех, кто ответил "Нет"
+            no_stmt = select(Reserv.full_name, Reserv.telegram_username).where(
+                Reserv.faculty == faculty,
+                Reserv.last_answer == 'no'
+            ).order_by(Reserv.full_name)
+            no_result = await session.execute(no_stmt)
+            no_users = no_result.fetchall()
+            
+            if not yes_users and not no_users:
+                continue  # Пропускаем факультеты без ответов
+            
+            text = f"🎓 {faculty}\n\n"
+            
+            if yes_users:
+                text += f"✅ Ответили \"Да\" ({len(yes_users)} чел.):\n"
+                for full_name, username in yes_users:
+                    tg_info = f"@{username}" if username else "нет TG"
+                    text += f"• {full_name} ({tg_info})\n"
+                text += "\n"
+            
+            if no_users:
+                text += f"❌ Ответили \"Нет\" ({len(no_users)} чел.):\n"
+                for full_name, username in no_users:
+                    tg_info = f"@{username}" if username else "нет TG"
+                    text += f"• {full_name} ({tg_info})\n"
+                text += "\n"
+            
+            text += "─" * 30
+            
+            # Разбиваем длинные сообщения
+            if len(text) > 4000:
+                # Отправляем заголовок
+                header = f"🎓 {faculty}\n\n"
+                await message.answer(header)
+                
+                # Отправляем "Да" отдельно
+                if yes_users:
+                    yes_text = f"✅ Ответили \"Да\" ({len(yes_users)} чел.):\n"
+                    for full_name, username in yes_users:
+                        tg_info = f"@{username}" if username else "нет TG"
+                        line = f"• {full_name} ({tg_info})\n"
+                        
+                        if len(yes_text + line) > 4000:
+                            await message.answer(yes_text)
+                            yes_text = line
+                        else:
+                            yes_text += line
+                    
+                    if yes_text.strip():
+                        await message.answer(yes_text)
+                
+                # Отправляем "Нет" отдельно
+                if no_users:
+                    no_text = f"❌ Ответили \"Нет\" ({len(no_users)} чел.):\n"
+                    for full_name, username in no_users:
+                        tg_info = f"@{username}" if username else "нет TG"
+                        line = f"• {full_name} ({tg_info})\n"
+                        
+                        if len(no_text + line) > 4000:
+                            await message.answer(no_text)
+                            no_text = line
+                        else:
+                            no_text += line
+                    
+                    if no_text.strip():
+                        await message.answer(no_text)
+            else:
+                await message.answer(text)
+
