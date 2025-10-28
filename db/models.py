@@ -68,3 +68,21 @@ class COResponse(Base):
 	campaign = relationship('CO', back_populates='responses')
 	bot_user = relationship('BotUser')
 
+
+class Reserv(Base):
+	"""Резервная таблица для рассылок - данные из res.xlsx."""
+	__tablename__ = 'reserv'
+	__table_args__ = (
+		UniqueConstraint('telegram_username', name='uq_reserv_telegram_username'),
+	)
+
+	id = Column(Integer, primary_key=True, index=True)
+	full_name = Column(String(255), nullable=False)
+	course = Column(String(128), nullable=True)
+	faculty = Column(String(255), nullable=True)
+	telegram_username = Column(String(64), nullable=True)
+	message_sent = Column(Boolean, default=False)  # флаг отправки сообщения
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	def __repr__(self) -> str:  # pragma: no cover - simple repr
+		return f"<Reserv(id={self.id!r}, full_name={self.full_name!r}, telegram={self.telegram_username!r})>"

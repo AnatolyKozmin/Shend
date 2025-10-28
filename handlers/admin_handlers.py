@@ -8,7 +8,7 @@ from aiogram.filters.state import StateFilter
 import asyncio
 from sqlalchemy import select, func
 from db.engine import async_session_maker
-from db.models import CO, COResponse, Person, BotUser
+from db.models import CO, COResponse, Person, BotUser, Reserv
 
 
 admin_router = Router()
@@ -27,6 +27,17 @@ class AllRassStates(StatesGroup):
 
 
 class DODepStates(StatesGroup):
+    waiting_faculty = State()
+    waiting_text = State()
+
+
+class ReservRassStates(StatesGroup):
+    waiting_faculty = State()
+    waiting_presence = State()
+    waiting_text = State()
+
+
+class DODepReservStates(StatesGroup):
     waiting_faculty = State()
     waiting_text = State()
 
@@ -382,3 +393,387 @@ async def get_stats(message: types.Message):
             if no_names:
                 text += '\n\nПоставили "Нет":\n' + '\n'.join(no_names)
             await message.answer(text)
+
+
+@admin_router.message(Command(commands=['poter']))
+async def poter_check(message: types.Message):
+    """Проверка совпадений telegram_username между Reserv и BotUser по факультетам."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    async with async_session_maker() as session:
+        # Получаем все записи из Reserv
+        reserv_stmt = select(Reserv).where(Reserv.telegram_username.isnot(None))
+        reserv_result = await session.execute(reserv_stmt)
+        reserv_users = reserv_result.scalars().all()
+        
+        if not reserv_users:
+            await message.answer("❌ В таблице Reserv нет пользователей с telegram_username.")
+            return
+        
+        # Получаем все telegram_username из BotUser (приводим к lowercase)
+        bot_users_stmt = select(BotUser.telegram_username).where(BotUser.telegram_username.isnot(None))
+        bot_users_result = await session.execute(bot_users_stmt)
+        bot_usernames = {username.lower() for (username,) in bot_users_result.fetchall() if username}
+        
+        # Группируем по факультетам
+        faculty_stats = {}
+        
+        for reserv_user in reserv_users:
+            faculty = reserv_user.faculty or "Без факультета"
+            
+            if faculty not in faculty_stats:
+                faculty_stats[faculty] = {
+                    "total": 0,
+                    "found": 0,
+                    "not_found": []
+                }
+            
+            faculty_stats[faculty]["total"] += 1
+            
+            # Приводим к lowercase и проверяем
+            username_lower = reserv_user.telegram_username.lower() if reserv_user.telegram_username else None
+            
+            if username_lower and username_lower in bot_usernames:
+                faculty_stats[faculty]["found"] += 1
+            else:
+                faculty_stats[faculty]["not_found"].append({
+                    "full_name": reserv_user.full_name,
+                    "username": reserv_user.telegram_username
+                })
+        
+        # Формируем ответ
+        if not faculty_stats:
+            await message.answer("В таблице Reserv нет данных для проверки.")
+            return
+        
+        # Отправляем общую статистику
+        total_reserv = sum(stats["total"] for stats in faculty_stats.values())
+        total_found = sum(stats["found"] for stats in faculty_stats.values())
+        total_not_found = sum(len(stats["not_found"]) for stats in faculty_stats.values())
+        
+        summary_text = f"📊 Общая статистика по Reserv:\n\n"
+        summary_text += f"📋 Всего в Reserv: {total_reserv} чел.\n"
+        summary_text += f"✅ Найдено в боте: {total_found} чел.\n"
+        summary_text += f"❌ Не найдено в боте: {total_not_found} чел.\n\n"
+        summary_text += "─" * 30
+        
+        await message.answer(summary_text)
+        
+        # Отправляем детальную статистику по факультетам
+        for faculty, stats in sorted(faculty_stats.items()):
+            faculty_text = f"🎓 {faculty}\n\n"
+            faculty_text += f"📋 Всего: {stats['total']} чел.\n"
+            faculty_text += f"✅ В боте: {stats['found']} чел.\n"
+            faculty_text += f"❌ Не в боте: {len(stats['not_found'])} чел.\n"
+            
+            if stats['not_found']:
+                faculty_text += f"\n👥 Список тех, кого нет в боте:\n"
+                for user in stats['not_found']:
+                    username_display = f"@{user['username']}" if user['username'] else "нет username"
+                    faculty_text += f"• {user['full_name']} ({username_display})\n"
+            
+            faculty_text += "\n" + "─" * 30
+            
+            # Разбиваем длинные сообщения
+            if len(faculty_text) > 4000:
+                # Отправляем заголовок
+                header = f"🎓 {faculty}\n\n"
+                header += f"📋 Всего: {stats['total']} чел.\n"
+                header += f"✅ В боте: {stats['found']} чел.\n"
+                header += f"❌ Не в боте: {len(stats['not_found'])} чел.\n\n"
+                await message.answer(header)
+                
+                # Отправляем список частями
+                if stats['not_found']:
+                    current_text = "👥 Список тех, кого нет в боте:\n"
+                    for user in stats['not_found']:
+                        username_display = f"@{user['username']}" if user['username'] else "нет username"
+                        line = f"• {user['full_name']} ({username_display})\n"
+                        
+                        if len(current_text + line) > 4000:
+                            await message.answer(current_text)
+                            current_text = line
+                        else:
+                            current_text += line
+                    
+                    if current_text.strip():
+                        await message.answer(current_text)
+            else:
+                await message.answer(faculty_text)
+
+
+@admin_router.message(Command(commands=['create_reserv_rass']))
+async def create_reserv_rass(message: types.Message, state: FSMContext):
+    """Создание рассылки для пользователей из таблицы Reserv."""
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    async with async_session_maker() as session:
+        # Получаем уникальные факультеты из Reserv
+        stmt = select(Reserv.faculty).distinct()
+        res = await session.execute(stmt)
+        faculties = [row[0] for row in res.all() if row[0]]
+
+    if not faculties:
+        await message.answer('❌ Нет записей с факультетами в таблице Reserv.')
+        return
+
+    kb = InlineKeyboardBuilder()
+    for f in faculties:
+        kb.row(InlineKeyboardButton(text=f, callback_data=f"reserv_faculty:{f}"))
+    kb = kb.as_markup()
+
+    await state.set_state(ReservRassStates.waiting_faculty)
+    await message.answer('Выберите факультет для рассылки из Reserv:', reply_markup=kb)
+
+
+@admin_router.callback_query(lambda c: c.data and c.data.startswith('reserv_faculty:'))
+async def reserv_faculty_chosen(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+
+    _, faculty = callback.data.split(':', 1)
+    await state.update_data(faculty=faculty)
+    await state.set_state(ReservRassStates.waiting_presence)
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text='Да (присутствие)', callback_data='reserv_presence:yes'),
+        InlineKeyboardButton(text='Нет', callback_data='reserv_presence:no')
+    )
+    kb = kb.as_markup()
+
+    await callback.message.answer(f'Выбран факультет: {faculty}\nЭто рассылка для присутствия?', reply_markup=kb)
+    await callback.answer()
+
+
+@admin_router.callback_query(lambda c: c.data and c.data.startswith('reserv_presence:'))
+async def reserv_presence_chosen(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+
+    _, ans = callback.data.split(':', 1)
+    is_presence = True if ans == 'yes' else False
+    await state.update_data(is_presence=is_presence)
+    await state.set_state(ReservRassStates.waiting_text)
+
+    await callback.message.answer('Пришлите текст рассылки для студентов из таблицы Reserv.')
+    await callback.answer()
+
+
+@admin_router.message(StateFilter(ReservRassStates.waiting_text))
+async def receive_reserv_text(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    data = await state.get_data()
+    faculty = data.get('faculty')
+    is_presence = data.get('is_presence', False)
+    text = message.text
+
+    async with async_session_maker() as session:
+        # Получаем список получателей из Reserv по факультету с username
+        reserv_stmt = select(Reserv).where(
+            Reserv.faculty == faculty,
+            Reserv.telegram_username.isnot(None)
+        )
+        reserv_result = await session.execute(reserv_stmt)
+        reserv_users = reserv_result.scalars().all()
+
+        if not reserv_users:
+            await message.answer(f'❌ В таблице Reserv нет пользователей факультета "{faculty}" с telegram_username.')
+            await state.clear()
+            return
+
+        # Получаем соответствующих BotUser по username (приводим к lowercase)
+        reserv_usernames = [ru.telegram_username.lower() for ru in reserv_users if ru.telegram_username]
+        
+        bot_users_stmt = select(BotUser).where(
+            func.lower(BotUser.telegram_username).in_(reserv_usernames)
+        )
+        bot_users_result = await session.execute(bot_users_stmt)
+        bot_users = bot_users_result.scalars().all()
+
+        if not bot_users:
+            await message.answer(f'❌ Не найдено ни одного пользователя из Reserv в BotUser для факультета "{faculty}".')
+            await state.clear()
+            return
+
+    # Клавиатура для опроса (если нужна)
+    def mk_kb(is_presence_flag: bool):
+        if is_presence_flag:
+            kb = InlineKeyboardBuilder()
+            kb.row(InlineKeyboardButton(text='Да', callback_data=f'reserv_answer:yes'))
+            kb.row(InlineKeyboardButton(text='Нет', callback_data=f'reserv_answer:no'))
+            return kb.as_markup()
+        return None
+
+    sent = 0
+    errors = 0
+    PAUSE_SECONDS = 0.1
+    
+    for bu in bot_users:
+        try:
+            if is_presence:
+                reply = mk_kb(True)
+                await message.bot.send_message(chat_id=bu.tg_id, text=text, reply_markup=reply)
+            else:
+                await message.bot.send_message(chat_id=bu.tg_id, text=text)
+            sent += 1
+            
+            # Обновляем флаг message_sent для соответствующих записей Reserv
+            async with async_session_maker() as session:
+                username_lower = bu.telegram_username.lower() if bu.telegram_username else None
+                if username_lower:
+                    update_stmt = select(Reserv).where(
+                        func.lower(Reserv.telegram_username) == username_lower
+                    )
+                    update_result = await session.execute(update_stmt)
+                    reserv_record = update_result.scalars().first()
+                    
+                    if reserv_record:
+                        reserv_record.message_sent = True
+                        session.add(reserv_record)
+                        await session.commit()
+            
+            await asyncio.sleep(PAUSE_SECONDS)
+        except Exception as e:
+            errors += 1
+            print(f"Ошибка отправки для {bu.tg_id}: {e}")
+
+    await message.answer(
+        f'✅ Рассылка из Reserv отправлена.\n'
+        f'Найдено в Reserv: {len(reserv_users)}\n'
+        f'Найдено в боте: {len(bot_users)}\n'
+        f'Успешно отправлено: {sent}\n'
+        f'Ошибок: {errors}'
+    )
+    await state.clear()
+
+
+@admin_router.message(Command(commands=['dodep_reserv']))
+async def dodep_reserv_start(message: types.Message, state: FSMContext):
+    """Рассылка тем из Reserv, кому ещё не отправлялось (message_sent = False)."""
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    async with async_session_maker() as session:
+        # Получаем уникальные факультеты из Reserv
+        stmt = select(Reserv.faculty).distinct()
+        res = await session.execute(stmt)
+        faculties = [row[0] for row in res.all() if row[0]]
+
+    if not faculties:
+        await message.answer('❌ Нет записей с факультетами в таблице Reserv.')
+        return
+
+    kb = InlineKeyboardBuilder()
+    for f in faculties:
+        kb.row(InlineKeyboardButton(text=f, callback_data=f"dodep_reserv_faculty:{f}"))
+    kb = kb.as_markup()
+
+    await state.set_state(DODepReservStates.waiting_faculty)
+    await message.answer('Выберите факультет для повторной рассылки (только тем, кому не отправлялось из Reserv):', reply_markup=kb)
+
+
+@admin_router.callback_query(lambda c: c.data and c.data.startswith('dodep_reserv_faculty:'))
+async def dodep_reserv_faculty_chosen(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+
+    _, faculty = callback.data.split(':', 1)
+    await state.update_data(faculty=faculty)
+    await state.set_state(DODepReservStates.waiting_text)
+
+    await callback.message.answer(f'Выбран факультет: {faculty}\nПришлите текст рассылки для тех, кому не отправлялось (с кнопками):')
+    await callback.answer()
+
+
+@admin_router.message(StateFilter(DODepReservStates.waiting_text))
+async def dodep_reserv_send(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    data = await state.get_data()
+    faculty = data.get('faculty')
+    text = message.text
+
+    async with async_session_maker() as session:
+        # Получаем пользователей из Reserv, которым ещё не отправлялось (message_sent = False)
+        reserv_stmt = select(Reserv).where(
+            Reserv.faculty == faculty,
+            Reserv.telegram_username.isnot(None),
+            Reserv.message_sent == False
+        )
+        reserv_result = await session.execute(reserv_stmt)
+        reserv_users = reserv_result.scalars().all()
+
+        if not reserv_users:
+            await message.answer(f'✅ Всем пользователям из Reserv факультета "{faculty}" уже отправлялись сообщения.')
+            await state.clear()
+            return
+
+        # Получаем соответствующих BotUser
+        reserv_usernames = [ru.telegram_username.lower() for ru in reserv_users if ru.telegram_username]
+        
+        bot_users_stmt = select(BotUser).where(
+            func.lower(BotUser.telegram_username).in_(reserv_usernames)
+        )
+        bot_users_result = await session.execute(bot_users_stmt)
+        bot_users = bot_users_result.scalars().all()
+
+        if not bot_users:
+            await message.answer(f'❌ Не найдено пользователей из Reserv в боте для факультета "{faculty}".')
+            await state.clear()
+            return
+
+    # Клавиатура с кнопками Да/Нет
+    def mk_kb():
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text='Да', callback_data=f'reserv_answer:yes'))
+        kb.row(InlineKeyboardButton(text='Нет', callback_data=f'reserv_answer:no'))
+        return kb.as_markup()
+
+    sent = 0
+    errors = 0
+    PAUSE_SECONDS = 0.1
+    
+    for bu in bot_users:
+        try:
+            reply = mk_kb()
+            await message.bot.send_message(chat_id=bu.tg_id, text=text, reply_markup=reply)
+            sent += 1
+            
+            # Обновляем флаг message_sent
+            async with async_session_maker() as session:
+                username_lower = bu.telegram_username.lower() if bu.telegram_username else None
+                if username_lower:
+                    update_stmt = select(Reserv).where(
+                        func.lower(Reserv.telegram_username) == username_lower
+                    )
+                    update_result = await session.execute(update_stmt)
+                    reserv_record = update_result.scalars().first()
+                    
+                    if reserv_record:
+                        reserv_record.message_sent = True
+                        session.add(reserv_record)
+                        await session.commit()
+            
+            await asyncio.sleep(PAUSE_SECONDS)
+        except Exception as e:
+            errors += 1
+            print(f"Ошибка отправки для {bu.tg_id}: {e}")
+
+    await message.answer(
+        f'✅ Повторная рассылка из Reserv завершена.\n'
+        f'Найдено без отправки: {len(reserv_users)}\n'
+        f'Найдено в боте: {len(bot_users)}\n'
+        f'Успешно отправлено: {sent}\n'
+        f'Ошибок: {errors}'
+    )
+    await state.clear()
+
