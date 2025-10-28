@@ -402,17 +402,19 @@ async def sobes_start(message: types.Message, state: FSMContext):
             await state.set_state(BookingSobesStates.waiting_date)
             return
         
-        # Факультет определён - показываем доступные даты
-        await show_available_dates(message, session, user_faculty, state)
+        # Факультет определён - показываем доступные времена
+        await show_available_times(message, session, user_faculty, state)
 
 
-async def show_available_dates(message: types.Message, session, user_faculty: str, state: FSMContext):
-    """Показывает доступные даты для записи."""
+async def show_available_times(message: types.Message, session, user_faculty: str, state: FSMContext):
+    """Показывает доступные времена для записи (дата определяется автоматически по факультету)."""
     # Ищем доступные слоты для факультета
     stmt = select(TimeSlot).join(Interviewer).where(
         TimeSlot.is_available == True,
         or_(
-            Interviewer.faculties.contains(user_faculty),
+            Interviewer.faculties.like(f"{user_faculty},%"),
+            Interviewer.faculties.like(f"%,{user_faculty},%"),
+            Interviewer.faculties.like(f"%,{user_faculty}"),
             Interviewer.faculties == user_faculty
         )
     ).order_by(TimeSlot.date, TimeSlot.time_start)
@@ -428,37 +430,51 @@ async def show_available_dates(message: types.Message, session, user_faculty: st
         await state.clear()
         return
     
-    # Группируем по датам
-    dates_dict = {}
-    for slot in available_slots:
-        if slot.date not in dates_dict:
-            dates_dict[slot.date] = []
-        dates_dict[slot.date].append(slot)
+    # Берём первую дату (у каждого факультета только одна дата)
+    selected_date = available_slots[0].date
     
-    # Сортируем даты
-    dates = sorted(dates_dict.keys())
+    # Фильтруем слоты только на эту дату
+    slots_for_date = [s for s in available_slots if s.date == selected_date]
     
-    # Сохраняем факультет в state
-    await state.update_data(faculty=user_faculty)
+    # Группируем по времени
+    times_dict = {}
+    for slot in slots_for_date:
+        time_key = f"{slot.time_start}-{slot.time_end}"
+        if time_key not in times_dict:
+            times_dict[time_key] = []
+        times_dict[time_key].append(slot)
     
-    # Формируем кнопки с датами
+    # Сохраняем данные в state
+    await state.update_data(
+        faculty=user_faculty,
+        selected_date=selected_date,
+        times_dict=times_dict
+    )
+    
+    # Формируем кнопки по 3 в ряд
     kb = InlineKeyboardBuilder()
-    for date in dates:
-        # Форматируем дату красиво
-        date_parts = date.split('-')
-        date_str = f"{date_parts[2]}.{date_parts[1]}"
-        slots_count = len(dates_dict[date])
-        kb.row(InlineKeyboardButton(
-            text=f"{date_str} ({slots_count} слотов)",
-            callback_data=f"sobes_date:{date}"
-        ))
+    times = sorted(times_dict.keys())
+    for i in range(0, len(times), 3):
+        row_times = times[i:i+3]
+        for time_key in row_times:
+            time_start = time_key.split('-')[0]
+            kb.add(InlineKeyboardButton(
+                text=time_start,
+                callback_data=f"sobes_time:{time_key}"
+            ))
+        kb.row()
+    
+    # Форматируем дату для отображения
+    date_parts = selected_date.split('-')
+    date_display = f"{date_parts[2]}.{date_parts[1]}.{date_parts[0]}"
     
     await message.answer(
-        f"🎓 Факультет: {user_faculty}\n\n"
-        f"📅 Выберите дату собеседования:",
+        f"🎓 Факультет: {user_faculty}\n"
+        f"📅 Дата: {date_display}\n\n"
+        f"⏰ Выберите удобное время:",
         reply_markup=kb.as_markup()
     )
-    await state.set_state(BookingSobesStates.waiting_date)
+    await state.set_state(BookingSobesStates.waiting_time)
 
 
 @interview_router.callback_query(F.data.startswith('select_faculty:'))
@@ -467,86 +483,7 @@ async def select_faculty_callback(callback: types.CallbackQuery, state: FSMConte
     _, faculty = callback.data.split(':', 1)
     
     async with async_session_maker() as session:
-        await show_available_dates(callback.message, session, faculty, state)
-    
-    try:
-        await callback.answer()
-    except TelegramBadRequest:
-        pass
-
-
-@interview_router.callback_query(F.data.startswith('sobes_date:'))
-async def sobes_date_callback(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка выбора даты."""
-    _, selected_date = callback.data.split(':', 1)
-    
-    # Получаем факультет из state
-    data = await state.get_data()
-    user_faculty = data.get('faculty')
-    
-    if not user_faculty:
-        await callback.message.answer("❌ Ошибка: факультет не определён. Начните заново с /sobes")
-        await state.clear()
-        return
-    
-    async with async_session_maker() as session:
-        # Получаем доступные слоты на выбранную дату
-        stmt = select(TimeSlot).join(Interviewer).where(
-            TimeSlot.date == selected_date,
-            TimeSlot.is_available == True,
-            or_(
-                Interviewer.faculties.contains(user_faculty),
-                Interviewer.faculties == user_faculty
-            )
-        ).order_by(TimeSlot.time_start)
-        
-        result = await session.execute(stmt)
-        available_slots = result.scalars().all()
-        
-        if not available_slots:
-            await callback.message.edit_text(
-                f"😔 На {selected_date} нет доступных слотов.\n\n"
-                "Выберите другую дату или начните заново с /sobes"
-            )
-            return
-        
-        # Группируем по времени
-        times_dict = {}
-        for slot in available_slots:
-            time_key = f"{slot.time_start}-{slot.time_end}"
-            if time_key not in times_dict:
-                times_dict[time_key] = []
-            times_dict[time_key].append(slot)
-        
-        # Сохраняем дату в state
-        await state.update_data(selected_date=selected_date, times_dict=times_dict)
-        
-        # Формируем кнопки по 3 в ряд
-        kb = InlineKeyboardBuilder()
-        times = sorted(times_dict.keys())
-        for i in range(0, len(times), 3):
-            row_times = times[i:i+3]
-            for time_key in row_times:
-                # Показываем только начало времени для краткости
-                time_start = time_key.split('-')[0]
-                kb.add(InlineKeyboardButton(
-                    text=time_start,
-                    callback_data=f"sobes_time:{time_key}"
-                ))
-            kb.row()
-        
-        # Форматируем дату для отображения
-        date_parts = selected_date.split('-')
-        date_display = f"{date_parts[2]}.{date_parts[1]}.{date_parts[0]}"
-        
-        await callback.message.edit_text(
-            f"🎓 Факультет: {user_faculty}\n"
-            f"📅 Дата: {date_display}\n\n"
-            f"⏰ Выберите удобное время:",
-            reply_markup=kb.as_markup()
-        )
-        
-        await state.set_state(BookingSobesStates.waiting_time)
+        await show_available_times(callback.message, session, faculty, state)
     
     try:
         await callback.answer()
