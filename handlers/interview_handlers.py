@@ -603,8 +603,33 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
             slot_result = await session.execute(slot_stmt)
             slot = slot_result.scalars().first()
             
-            # Проверяем что слот ещё доступен
+            # Проверяем что слот существует и доступен
             if not slot or not slot.is_available:
+                await callback.message.edit_text(
+                    "😔 К сожалению, это время уже занято.\n\n"
+                    "Используйте /sobes чтобы выбрать другое время."
+                )
+                await state.clear()
+                try:
+                    await callback.answer("Время уже занято", show_alert=True)
+                except TelegramBadRequest:
+                    pass
+                return
+            
+            # Проверяем что на этот слот ещё нет активной записи
+            existing_interview_stmt = select(Interview).where(
+                Interview.time_slot_id == selected_slot_id,
+                Interview.status.in_(['confirmed', 'pending'])
+            )
+            existing_interview_result = await session.execute(existing_interview_stmt)
+            existing_interview = existing_interview_result.scalars().first()
+            
+            if existing_interview:
+                # Слот уже занят, но is_available не обновился (баг в логике отмены)
+                # Исправляем is_available и сообщаем пользователю
+                slot.is_available = False
+                await session.commit()
+                
                 await callback.message.edit_text(
                     "😔 К сожалению, это время уже занято.\n\n"
                     "Используйте /sobes чтобы выбрать другое время."
