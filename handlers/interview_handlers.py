@@ -258,11 +258,19 @@ async def sync_slots(message: types.Message):
                         skipped += 1
                         continue
                     
-                    # Обновляем факультеты собеседующего
-                    faculties_str = ",".join(slot_info['faculties'])
-                    if interviewer.faculties != faculties_str:
-                        interviewer.faculties = faculties_str
-                        session.add(interviewer)
+                    # Обновляем факультеты собеседующего (добавляем, не перезаписываем)
+                    new_faculties = slot_info['faculties']
+                    
+                    if interviewer.faculties:
+                        # Есть уже факультеты - добавляем новые
+                        existing = set(interviewer.faculties.split(','))
+                        existing.update(new_faculties)
+                        interviewer.faculties = ','.join(sorted(existing))
+                    else:
+                        # Нет факультетов - просто записываем
+                        interviewer.faculties = ','.join(sorted(new_faculties))
+                    
+                    session.add(interviewer)
                     
                     # Проверяем, есть ли уже такой слот
                     existing_slot_stmt = select(TimeSlot).where(
