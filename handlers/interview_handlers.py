@@ -380,9 +380,8 @@ async def sobes_start(message: types.Message, state: FSMContext):
             
             await message.answer(
                 f"⚠️ У вас уже есть запись на собеседование!\n\n"
-                f"📅 Дата: {slot.date}\n"
-                f"⏰ Время: {slot.time_start} - {slot.time_end}\n"
-                f"🎓 Факультет: {existing_interview.faculty}\n\n"
+                f"🎓 Факультет: {existing_interview.faculty}\n"
+                f"⏰ Время: {slot.time_start} - {slot.time_end}\n\n"
                 f"❗️ Записаться можно только один раз.\n"
                 f"Для изменения времени обратитесь к администратору.",
                 reply_markup=kb.as_markup()
@@ -484,13 +483,8 @@ async def show_available_times(message: types.Message, session, user_faculty: st
             callback_data=f"sobes_time:{time_key}"
         ))
     
-    # Форматируем дату для отображения
-    date_parts = selected_date.split('-')
-    date_display = f"{date_parts[2]}.{date_parts[1]}.{date_parts[0]}"
-    
     await message.answer(
-        f"🎓 Факультет: {user_faculty}\n"
-        f"📅 Дата: {date_display}\n\n"
+        f"🎓 Факультет: {user_faculty}\n\n"
         f"⏰ Выберите удобное время:",
         reply_markup=kb.as_markup()
     )
@@ -689,10 +683,6 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
             interviewer_result = await session.execute(interviewer_stmt)
             interviewer = interviewer_result.scalars().first()
             
-            # Форматируем дату
-            date_parts = selected_date.split('-')
-            date_display = f"{date_parts[2]}.{date_parts[1]}.{date_parts[0]}"
-            
             # Кнопки для кандидата
             kb = InlineKeyboardBuilder()
             kb.row(InlineKeyboardButton(text="❓ Задать вопрос", callback_data=f"ask_question:{interview.id}"))
@@ -700,7 +690,6 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
             await callback.message.edit_text(
                 f"🎉 Вы успешно записаны на собеседование!\n\n"
                 f"🎓 Факультет: {user_faculty}\n"
-                f"📅 Дата: {date_display}\n"
                 f"⏰ Время: {selected_time}\n\n"
                 f"❗️ Записаться можно только один раз.\n"
                 f"Для изменения времени обратитесь к администратору.",
