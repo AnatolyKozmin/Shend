@@ -274,3 +274,82 @@ def get_schedules_data() -> tuple[List[Dict[str, any]], Dict[str, int]]:
         print(f"❌ Ошибка при чтении расписания: {e}")
         return [], {}
 
+
+def export_interviews_to_sheet(interviews_data: List[Dict[str, str]]) -> bool:
+    """
+    Экспортирует записи на собеседования в лист WORK таблицы с расписанием.
+    
+    Args:
+        interviews_data: Список записей в формате:
+        [
+            {
+                'candidate_name': 'Иванов Иван',
+                'faculty': 'МЭО',
+                'date': '2024-10-29',
+                'time': '09:00-09:45',
+                'interviewer_name': 'Петров Петр',
+                'interviewer_id': 'interviewer_001',
+                'status': 'confirmed'
+            },
+            ...
+        ]
+    
+    Returns:
+        bool: True если успешно, False если ошибка
+    """
+    try:
+        client = get_google_sheets_client()
+        sheet = client.open_by_key(SCHEDULE_SHEET_ID)
+        
+        # Пытаемся получить лист WORK
+        try:
+            worksheet = sheet.worksheet('WORK')
+            print("📋 Лист WORK найден, очищаю...")
+            worksheet.clear()
+        except:
+            # Если листа нет - создаём
+            print("📋 Лист WORK не найден, создаю...")
+            worksheet = sheet.add_worksheet(title='WORK', rows=1000, cols=10)
+        
+        # Заголовки
+        headers = [
+            'Кандидат',
+            'Факультет',
+            'Дата',
+            'Время',
+            'Собеседующий',
+            'ID собеседующего',
+            'Статус',
+            'Дата записи'
+        ]
+        
+        # Подготавливаем данные для записи
+        rows = [headers]
+        for interview in interviews_data:
+            rows.append([
+                interview.get('candidate_name', 'Не указано'),
+                interview.get('faculty', 'Не указан'),
+                interview.get('date', ''),
+                interview.get('time', ''),
+                interview.get('interviewer_name', 'Не указан'),
+                interview.get('interviewer_id', ''),
+                interview.get('status', 'confirmed'),
+                interview.get('created_at', '')
+            ])
+        
+        # Записываем данные
+        worksheet.update('A1', rows)
+        
+        # Форматируем заголовок (жирный шрифт)
+        worksheet.format('A1:H1', {
+            'textFormat': {'bold': True},
+            'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+        })
+        
+        print(f"✅ Экспортировано {len(interviews_data)} записей в лист WORK")
+        return True
+    
+    except Exception as e:
+        print(f"❌ Ошибка экспорта в Google Sheets: {e}")
+        return False
+

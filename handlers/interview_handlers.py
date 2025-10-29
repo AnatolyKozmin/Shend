@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, and_, or_
 from db.engine import async_session_maker
 from db.models import Interviewer, BotUser, TimeSlot, Interview, Person, InterviewMessage
-from utils.google_sheets import find_interviewer_by_code, get_schedules_data
+from utils.google_sheets import find_interviewer_by_code, get_schedules_data, export_interviews_to_sheet
 from datetime import datetime
 import random
 
@@ -1225,4 +1225,90 @@ async def sobeser_stats_command(message: types.Message):
         )
         
         await message.answer(text, parse_mode="HTML")
+
+
+@interview_router.message(Command('export_interviews'))
+async def export_interviews_command(message: types.Message):
+    """Экспорт всех записей в Google Sheets (лист WORK) - только для админа."""
+    ADMIN_ID = 922109605  # TODO: вынести в конфиг
+    
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Нет доступа. Команда только для администратора.")
+        return
+    
+    await message.answer("🔄 Начинаю экспорт записей в Google Sheets...")
+    
+    async with async_session_maker() as session:
+        # Получаем все активные записи
+        stmt = select(Interview).where(
+            Interview.status.in_(['confirmed', 'pending'])
+        ).order_by(Interview.created_at)
+        result = await session.execute(stmt)
+        interviews = result.scalars().all()
+        
+        if not interviews:
+            await message.answer("📋 Нет активных записей для экспорта.")
+            return
+        
+        # Подготавливаем данные для экспорта
+        export_data = []
+        
+        for interview in interviews:
+            # Получаем слот
+            slot_stmt = select(TimeSlot).where(TimeSlot.id == interview.time_slot_id)
+            slot_result = await session.execute(slot_stmt)
+            slot = slot_result.scalars().first()
+            
+            # Получаем собеседующего
+            interviewer_stmt = select(Interviewer).where(Interviewer.id == interview.interviewer_id)
+            interviewer_result = await session.execute(interviewer_stmt)
+            interviewer = interviewer_result.scalars().first()
+            
+            # Получаем кандидата
+            candidate_name = "Не указано"
+            if interview.person_id:
+                person_stmt = select(Person).where(Person.id == interview.person_id)
+                person_result = await session.execute(person_stmt)
+                person = person_result.scalars().first()
+                if person:
+                    candidate_name = person.full_name
+            else:
+                # Пытаемся получить из bot_user
+                bot_user_stmt = select(BotUser).where(BotUser.id == interview.bot_user_id)
+                bot_user_result = await session.execute(bot_user_stmt)
+                bot_user = bot_user_result.scalars().first()
+                if bot_user and bot_user.telegram_username:
+                    candidate_name = f"@{bot_user.telegram_username}"
+            
+            # Форматируем дату
+            date_formatted = slot.date if slot else ""
+            time_formatted = f"{slot.time_start}-{slot.time_end}" if slot else ""
+            created_at_formatted = interview.created_at.strftime("%Y-%m-%d %H:%M") if interview.created_at else ""
+            
+            export_data.append({
+                'candidate_name': candidate_name,
+                'faculty': interview.faculty or "Не указан",
+                'date': date_formatted,
+                'time': time_formatted,
+                'interviewer_name': interviewer.full_name if interviewer else "Не указан",
+                'interviewer_id': interviewer.interviewer_sheet_id if interviewer else "",
+                'status': interview.status,
+                'created_at': created_at_formatted
+            })
+        
+        # Экспортируем в Google Sheets
+        from utils.google_sheets import SCHEDULE_SHEET_URL
+        success = export_interviews_to_sheet(export_data)
+        
+        if success:
+            await message.answer(
+                f"✅ Успешно экспортировано {len(export_data)} записей в лист WORK!\n\n"
+                f"📊 Таблица: {SCHEDULE_SHEET_URL}\n"
+                f"📋 Лист: WORK"
+            )
+        else:
+            await message.answer(
+                "❌ Ошибка при экспорте в Google Sheets.\n\n"
+                "Проверьте логи для подробностей."
+            )
 
