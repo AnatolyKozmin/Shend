@@ -1156,3 +1156,67 @@ async def my_interviews_command(message: types.Message):
         
         await message.answer(text, parse_mode="HTML")
 
+
+@interview_router.message(Command('sobeser_stats'))
+async def sobeser_stats_command(message: types.Message):
+    """Статистика по всем собеседующим (для админа)."""
+    ADMIN_ID = 922109605  # TODO: вынести в конфиг
+    
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Нет доступа. Команда только для администратора.")
+        return
+    
+    async with async_session_maker() as session:
+        # Получаем всех собеседующих
+        stmt = select(Interviewer).where(Interviewer.is_active == True).order_by(Interviewer.full_name)
+        result = await session.execute(stmt)
+        interviewers = result.scalars().all()
+        
+        if not interviewers:
+            await message.answer("📋 Нет зарегистрированных собеседующих.")
+            return
+        
+        text = "📊 <b>Статистика по собеседующим</b>\n\n"
+        
+        total_slots = 0
+        total_booked = 0
+        total_free = 0
+        
+        for interviewer in interviewers:
+            # Получаем все слоты собеседующего
+            slots_stmt = select(TimeSlot).where(TimeSlot.interviewer_id == interviewer.id)
+            slots_result = await session.execute(slots_stmt)
+            slots = slots_result.scalars().all()
+            
+            if not slots:
+                continue
+            
+            # Считаем статистику
+            free_slots = sum(1 for s in slots if s.is_available)
+            booked_slots = len(slots) - free_slots
+            
+            total_slots += len(slots)
+            total_booked += booked_slots
+            total_free += free_slots
+            
+            # Факультеты
+            faculties_str = interviewer.faculties if interviewer.faculties else "Не указаны"
+            
+            text += (
+                f"👤 <b>{interviewer.full_name}</b>\n"
+                f"   ID: {interviewer.interviewer_sheet_id}\n"
+                f"   🎓 Факультеты: {faculties_str}\n"
+                f"   📊 Слотов: {len(slots)} (🟢 {free_slots} свободно, 🔴 {booked_slots} занято)\n\n"
+            )
+        
+        text += (
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Итого:</b>\n"
+            f"👥 Собеседующих: {len(interviewers)}\n"
+            f"📊 Всего слотов: {total_slots}\n"
+            f"🟢 Свободно: {total_free}\n"
+            f"🔴 Занято: {total_booked}"
+        )
+        
+        await message.answer(text, parse_mode="HTML")
+

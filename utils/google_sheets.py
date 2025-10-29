@@ -104,57 +104,32 @@ def find_interviewer_by_code(access_code: str) -> Optional[Dict[str, str]]:
 SCHEDULE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1b89aY_hiv1qaPvE5Iuwr_lKYsvo1e3l3qtOZYSHQoQU/edit"
 SCHEDULE_SHEET_ID = "1b89aY_hiv1qaPvE5Iuwr_lKYsvo1e3l3qtOZYSHQoQU"
 
-# Маппинг листов на даты и факультеты с диапазонами строк
+# Маппинг листов на даты и факультеты
+# Новая структура: листы "1"-"6", столбец A - имя, столбец T - ID, B-S - слоты
 SCHEDULE_SHEETS = {
-    "29.10 / СНиМК + МЭО": {
-        "date": "2025-10-29",
-        "groups": [
-            {
-                "faculties": ["СНиМК", "МЭО"],  # Вместе в одном корпусе
-                "row_start": 3,  # B3
-                "row_end": 13    # S13 (включительно)
-            }
-        ]
+    "1": {
+        "faculties": ["МЭО", "СНиМК"],  # Вместе в одном здании
+        "date": "2024-10-29"  # Дата будет обновляться
     },
-    "30.10 / ФЭБ + ЮФ": {
-        "date": "2025-10-30",
-        "groups": [
-            {
-                "faculties": ["ФЭБ"],
-                "row_start": 3,  # B3
-                "row_end": 6     # S6
-            },
-            {
-                "faculties": ["Юрфак"],
-                "row_start": 12,  # B12
-                "row_end": 17     # S17
-            }
-        ]
+    "2": {
+        "faculties": ["ФЭБ"],
+        "date": "2024-10-30"
     },
-    "31.10 / ФФ + ИТиАБД": {
-        "date": "2025-10-31",
-        "groups": [
-            {
-                "faculties": ["ИТиАБД"],
-                "row_start": 3,   # B3
-                "row_end": 8      # S8
-            },
-            {
-                "faculties": ["ФинФак"],
-                "row_start": 15,  # B15
-                "row_end": 20     # S20
-            }
-        ]
+    "3": {
+        "faculties": ["Юрфак"],
+        "date": "2024-10-31"
     },
-    "06.11 / НАБ + ВШУ": {
-        "date": "2025-11-06",
-        "groups": [
-            {
-                "faculties": ["НАБ", "ВШУ"],  # Вместе в одном корпусе
-                "row_start": 3,  # B3
-                "row_end": 13    # S13
-            }
-        ]
+    "4": {
+        "faculties": ["ИТиАБД"],
+        "date": "2024-11-01"
+    },
+    "5": {
+        "faculties": ["ФинФак"],
+        "date": "2024-11-02"
+    },
+    "6": {
+        "faculties": ["НАБ", "ВШУ"],  # Вместе в одном здании
+        "date": "2024-11-06"
     }
 }
 
@@ -196,7 +171,12 @@ def get_time_end(time_start: str) -> str:
 
 def get_schedules_data() -> tuple[List[Dict[str, any]], Dict[str, int]]:
     """
-    Читает расписание слотов из Google Sheets с учётом диапазонов строк для каждого факультета.
+    Читает расписание слотов из Google Sheets (листы "1"-"6").
+    
+    Формат каждого листа:
+    - Столбец A: Имя и фамилия собеседующего
+    - Столбец T (индекс 19): ID собеседующего
+    - Столбцы B-S (индексы 1-18): Временные слоты (1 = доступен, пусто = недоступен)
     
     Returns:
         tuple: (список слотов, статистика по собеседующим)
@@ -215,79 +195,69 @@ def get_schedules_data() -> tuple[List[Dict[str, any]], Dict[str, int]]:
         # Проходим по всем листам
         for sheet_name, info in SCHEDULE_SHEETS.items():
             date = info['date']
-            groups = info['groups']
+            faculties = info['faculties']
+            faculties_str = ', '.join(faculties)
             
             try:
-                print(f"\n📋 Обрабатываю лист: {sheet_name}")
+                print(f"\n📋 Обрабатываю лист '{sheet_name}': {faculties_str}")
                 worksheet = sheet.worksheet(sheet_name)
                 time.sleep(1)  # Защита от rate limit Google API
                 
                 # Получаем все значения листа
                 all_values = worksheet.get_all_values()
                 
-                # Проходим по группам факультетов на этом листе
-                for group in groups:
-                    faculties = group['faculties']
-                    row_start = group['row_start'] - 1  # Индексация с 0
-                    row_end = group['row_end']
+                # Проходим по всем строкам (пропускаем заголовок если есть)
+                for row_idx, row in enumerate(all_values):
+                    if len(row) < 20:  # Минимум должно быть A + B-S + T (20 колонок)
+                        continue
                     
-                    faculties_str = ', '.join(faculties)
-                    print(f"  📌 Факультеты: {faculties_str} (строки {group['row_start']}-{group['row_end']})")
+                    interviewer_name = row[0].strip()  # Колонка A
+                    if not interviewer_name:  # Пустая строка - пропускаем
+                        continue
                     
-                    # Проходим по строкам в диапазоне
-                    for row_idx in range(row_start, min(row_end, len(all_values))):
-                        row = all_values[row_idx]
-                        
-                        if len(row) < 23:  # Минимум должно быть A + B-S + W (23 колонки)
+                    # Пропускаем заголовки
+                    if interviewer_name.lower() in ['имя', 'фио', 'собеседующий', 'время', 'name']:
+                        continue
+                    
+                    interviewer_sheet_id = row[19].strip() if len(row) > 19 else ''  # Колонка T (индекс 19)
+                    if not interviewer_sheet_id:  # Нет ID - пропускаем
+                        print(f"    ⚠️ Пропущен '{interviewer_name}' (строка {row_idx + 1}): нет ID в колонке T")
+                        continue
+                    
+                    # Счётчик слотов для этого собеседующего
+                    slots_count = 0
+                    
+                    # Проходим по временным слотам (B-S, индексы 1-18)
+                    for col_idx, time_start in TIME_SLOTS.items():
+                        # Пропускаем обед (13:30)
+                        if time_start == "13:30":
                             continue
                         
-                        interviewer_name = row[0].strip()  # Колонка A
-                        if not interviewer_name:  # Пустая строка - пропускаем
+                        if col_idx >= len(row):
                             continue
                         
-                        # Пропускаем заголовки
-                        if interviewer_name.lower() in ['имя', 'фио', 'собеседующий', 'время']:
-                            continue
+                        cell_value = str(row[col_idx]).strip()
                         
-                        interviewer_sheet_id = row[22].strip() if len(row) > 22 else ''  # Колонка W (индекс 22)
-                        if not interviewer_sheet_id:  # Нет ID - пропускаем
-                            print(f"    ⚠️ Пропущен '{interviewer_name}': нет ID в колонке W")
-                            continue
-                        
-                        # Счётчик слотов для этого собеседующего
-                        slots_count = 0
-                        
-                        # Проходим по временным слотам (B-S, индексы 1-18)
-                        for col_idx, time_start in TIME_SLOTS.items():
-                            # Пропускаем обед (13:30)
-                            if time_start == "13:30":
-                                continue
+                        # Если в ячейке "1" - слот доступен
+                        if cell_value == "1":
+                            time_end = get_time_end(time_start)
                             
-                            if col_idx >= len(row):
-                                continue
+                            all_slots.append({
+                                'interviewer_sheet_id': interviewer_sheet_id,
+                                'interviewer_name': interviewer_name,
+                                'date': date,
+                                'time_start': time_start,
+                                'time_end': time_end,
+                                'faculties': faculties  # Список факультетов для этого листа
+                            })
                             
-                            cell_value = str(row[col_idx]).strip()
-                            
-                            # Если в ячейке "1" - слот доступен
-                            if cell_value == "1":
-                                time_end = get_time_end(time_start)
-                                
-                                all_slots.append({
-                                    'interviewer_sheet_id': interviewer_sheet_id,
-                                    'interviewer_name': interviewer_name,
-                                    'date': date,
-                                    'time_start': time_start,
-                                    'time_end': time_end,
-                                    'faculties': faculties  # Список факультетов для этой группы
-                                })
-                                
-                                slots_count += 1
-                        
-                        # Сохраняем статистику
-                        if slots_count > 0:
-                            key = f"{interviewer_name} ({interviewer_sheet_id})"
-                            interviewer_stats[key] = interviewer_stats.get(key, 0) + slots_count
-                            print(f"    ✅ {interviewer_name}: {slots_count} слотов")
+                            slots_count += 1
+                    
+                    # Сохраняем статистику
+                    if slots_count > 0:
+                        key = f"{interviewer_name} ({interviewer_sheet_id})"
+                        interviewer_stats[key] = interviewer_stats.get(key, 0) + slots_count
+                        print(f"    ✅ {interviewer_name}: {slots_count} слотов")
                 
                 time.sleep(0.5)  # Небольшая задержка между листами
                 
