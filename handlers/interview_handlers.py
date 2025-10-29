@@ -536,10 +536,6 @@ async def sobes_time_callback(callback: types.CallbackQuery, state: FSMContext):
     # Сохраняем выбор в state
     await state.update_data(selected_slot_id=selected_slot_id, selected_time=time_key)
     
-    # Форматируем дату
-    date_parts = selected_date.split('-')
-    date_display = f"{date_parts[2]}.{date_parts[1]}.{date_parts[0]}"
-    
     # Подтверждение
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -550,7 +546,6 @@ async def sobes_time_callback(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"✅ Подтвердите запись на собеседование:\n\n"
         f"🎓 Факультет: {user_faculty}\n"
-        f"📅 Дата: {date_display}\n"
         f"⏰ Время: {time_key}\n\n"
         f"Записаться?",
         reply_markup=kb.as_markup()
@@ -707,7 +702,6 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
                         f"📌 Новая запись на собеседование!\n\n"
                         f"👤 Кандидат: {student_name}\n"
                         f"🎓 Факультет: {user_faculty}\n"
-                        f"📅 Дата: {date_display}\n"
                         f"⏰ Время: {selected_time}\n\n"
                         f"Кандидат может задать вам вопрос через бота."
                     )
@@ -810,13 +804,10 @@ async def cancel_interview_callback(callback: types.CallbackQuery, state: FSMCon
                 try:
                     student_name = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.full_name
                     
-                    # Форматируем дату
+                    # Форматируем время
                     if slot:
-                        date_parts = slot.date.split('-')
-                        date_display = f"{date_parts[2]}.{date_parts[1]}.{date_parts[0]}"
                         time_display = f"{slot.time_start}-{slot.time_end}"
                     else:
-                        date_display = "N/A"
                         time_display = "N/A"
                     
                     await callback.bot.send_message(
@@ -824,7 +815,6 @@ async def cancel_interview_callback(callback: types.CallbackQuery, state: FSMCon
                         f"❌ Запись отменена\n\n"
                         f"👤 Кандидат: {student_name}\n"
                         f"🎓 Факультет: {interview.faculty}\n"
-                        f"📅 Дата: {date_display}\n"
                         f"⏰ Время: {time_display}\n\n"
                         f"Слот снова доступен для записи."
                     )
@@ -1152,6 +1142,7 @@ async def my_interviews_command(message: types.Message):
         await message.answer(text, parse_mode="HTML")
 
 
+@interview_router.message(Command('a'))
 @interview_router.message(Command('sobeser_stats'))
 async def sobeser_stats_command(message: types.Message):
     """Статистика по всем собеседующим (для админа)."""
@@ -1187,7 +1178,8 @@ async def sobeser_stats_command(message: types.Message):
                 continue
             
             # Считаем статистику
-            free_slots = sum(1 for s in slots if s.is_available)
+            free_slots_list = [s for s in slots if s.is_available]
+            free_slots = len(free_slots_list)
             booked_slots = len(slots) - free_slots
             
             total_slots += len(slots)
@@ -1201,8 +1193,18 @@ async def sobeser_stats_command(message: types.Message):
                 f"👤 <b>{interviewer.full_name}</b>\n"
                 f"   ID: {interviewer.interviewer_sheet_id}\n"
                 f"   🎓 Факультеты: {faculties_str}\n"
-                f"   📊 Слотов: {len(slots)} (🟢 {free_slots} свободно, 🔴 {booked_slots} занято)\n\n"
+                f"   📊 Слотов: {len(slots)} (🟢 {free_slots} свободно, 🔴 {booked_slots} занято)\n"
             )
+            
+            # Показываем доступные слоты с временем
+            if free_slots_list:
+                text += f"   🟢 Доступны: "
+                times = [f"{s.time_start}" for s in sorted(free_slots_list, key=lambda x: x.time_start)]
+                text += ", ".join(times[:5])  # Показываем первые 5
+                if len(times) > 5:
+                    text += f" +{len(times) - 5} еще"
+                text += "\n"
+            text += "\n"
         
         text += (
             f"━━━━━━━━━━━━━━━━━━━━\n"
