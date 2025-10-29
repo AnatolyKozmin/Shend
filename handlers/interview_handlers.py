@@ -458,6 +458,15 @@ async def show_available_times(message: types.Message, session, user_faculty: st
             times_dict[time_key] = []
         times_dict[time_key].append(slot)
     
+    # Проверяем что есть хотя бы один слот
+    if not times_dict:
+        await message.answer(
+            f"😔 К сожалению, на данный момент нет доступных слотов для факультета {user_faculty}.\n\n"
+            "Попробуйте позже или обратитесь к администратору."
+        )
+        await state.clear()
+        return
+    
     # Сохраняем данные в state
     await state.update_data(
         faculty=user_faculty,
@@ -465,18 +474,15 @@ async def show_available_times(message: types.Message, session, user_faculty: st
         times_dict=times_dict
     )
     
-    # Формируем кнопки по 3 в ряд
+    # Формируем кнопки ВЕРТИКАЛЬНО (по одной в ряд)
     kb = InlineKeyboardBuilder()
     times = sorted(times_dict.keys())
-    for i in range(0, len(times), 3):
-        row_times = times[i:i+3]
-        for time_key in row_times:
-            time_start = time_key.split('-')[0]
-            kb.add(InlineKeyboardButton(
-                text=time_start,
-                callback_data=f"sobes_time:{time_key}"
-            ))
-        kb.row()
+    for time_key in times:
+        time_start = time_key.split('-')[0]
+        kb.row(InlineKeyboardButton(
+            text=f"🕐 {time_start}",
+            callback_data=f"sobes_time:{time_key}"
+        ))
     
     # Форматируем дату для отображения
     date_parts = selected_date.split('-')
