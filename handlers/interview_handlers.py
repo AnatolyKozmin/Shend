@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, and_, or_
 from db.engine import async_session_maker
 from db.models import Interviewer, BotUser, TimeSlot, Interview, Person, InterviewMessage
-from utils.google_sheets import find_interviewer_by_code, get_schedules_data, export_interviews_to_sheet, append_interview_to_work
+from utils.google_sheets import find_interviewer_by_code, get_schedules_data, export_interviews_to_sheet, append_interview_to_work, SCHEDULE_SHEETS
 from datetime import datetime
 import random
 
@@ -59,6 +59,85 @@ async def register_sobes_start(message: types.Message, state: FSMContext):
         "Введите ваш код доступа (5 символов):"
     )
 
+
+@interview_router.message(Command('get_podrobno'))
+async def get_podrobno_command(message: types.Message):
+    """Детальный вывод: по каждому собеседующему — все слоты и факультеты.
+
+    Для каждого собеседующего показываем список факультетов (по данным синхронизации),
+    затем полный список его слотов, сгруппированный по датам.
+    """
+    ADMIN_ID = 922109605  # TODO: вынести в конфиг
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Нет доступа. Команда только для администратора.")
+        return
+
+    async with async_session_maker() as session:
+        stmt = select(Interviewer).where(Interviewer.is_active == True).order_by(Interviewer.full_name)
+        res = await session.execute(stmt)
+        interviewers = res.scalars().all()
+
+        if not interviewers:
+            await message.answer("📋 Нет зарегистрированных собеседующих.")
+            return
+
+        for interviewer in interviewers:
+            # Получаем все слоты собеседующего
+            slots_stmt = select(TimeSlot).where(TimeSlot.interviewer_id == interviewer.id).order_by(TimeSlot.date, TimeSlot.time_start)
+            slots_res = await session.execute(slots_stmt)
+            slots = slots_res.scalars().all()
+
+            faculties_str = interviewer.faculties if interviewer.faculties else "Не указаны"
+
+            if not slots:
+                text = (
+                    f"👤 <b>{interviewer.full_name}</b>\n"
+                    f"ID: {interviewer.interviewer_sheet_id or '—'}\n"
+                    f"🎓 Факультеты: {faculties_str}\n"
+                    f"⏰ Слотов нет\n"
+                )
+                await message.answer(text, parse_mode="HTML")
+                continue
+
+            # Группируем по датам
+            from collections import defaultdict
+            by_date = defaultdict(list)
+            for s in slots:
+                by_date[s.date].append(s)
+
+            text = (
+                f"👤 <b>{interviewer.full_name}</b>\n"
+                f"ID: {interviewer.interviewer_sheet_id or '—'}\n"
+                f"🎓 Факультеты: {faculties_str}\n"
+                f"📊 Слотов всего: {len(slots)}\n\n"
+            )
+
+            for date in sorted(by_date.keys()):
+                day_slots = sorted(by_date[date], key=lambda x: x.time_start)
+                text += f"📅 <b>{date}</b> ({len(day_slots)})\n"
+                # Выводим все времена подряд
+                for s in day_slots:
+                    status = "🟢" if s.is_available else "🔴"
+                    text += f"  {status} {s.time_start}-{s.time_end}\n"
+                text += "\n"
+
+            # Telegram ограничение на длину: разобьём при необходимости
+            MAX = 3500
+            if len(text) <= MAX:
+                await message.answer(text, parse_mode="HTML")
+            else:
+                # Грубая разбивка по абзацам
+                parts = []
+                current = ""
+                for line in text.splitlines(True):
+                    if len(current) + len(line) > MAX:
+                        parts.append(current)
+                        current = ""
+                    current += line
+                if current:
+                    parts.append(current)
+                for part in parts:
+                    await message.answer(part, parse_mode="HTML")
 
 @interview_router.message(RegisterSobesStates.waiting_code)
 async def register_sobes_code(message: types.Message, state: FSMContext):
@@ -250,6 +329,10 @@ async def sync_slots(message: types.Message):
             skipped = 0
             errors = 0
             
+            # Множества для последующей очистки устаревших слотов
+            valid_slot_keys = set()  # (interviewer_id, date, time_start)
+            touched_interviewers = set()
+
             for slot_info in slots_data:
                 try:
                     # Находим собеседующего по interviewer_sheet_id
@@ -264,6 +347,8 @@ async def sync_slots(message: types.Message):
                         skipped += 1
                         continue
                     
+                    touched_interviewers.add(interviewer.id)
+
                     # Обновляем факультеты собеседующего (добавляем, не перезаписываем)
                     new_faculties = slot_info['faculties']
                     
@@ -309,6 +394,9 @@ async def sync_slots(message: types.Message):
                         )
                         session.add(new_slot)
                         added += 1
+
+                    # Добавляем ключ валидного слота из актуального Google Sheets
+                    valid_slot_keys.add((interviewer.id, slot_info['date'], slot_info['time_start']))
                 
                 except Exception as e:
                     print(f"Ошибка обработки слота: {e}")
@@ -316,6 +404,35 @@ async def sync_slots(message: types.Message):
             
             # Сохраняем изменения
             await session.commit()
+
+            # Очистка: удаляем устаревшие свободные слоты, которых больше нет в Google Sheets
+            try:
+                if touched_interviewers:
+                    stale_deleted = 0
+                    for interviewer_id in touched_interviewers:
+                        slots_stmt = select(TimeSlot).where(TimeSlot.interviewer_id == interviewer_id)
+                        all_slots_res = await session.execute(slots_stmt)
+                        all_slots = all_slots_res.scalars().all()
+                        for s in all_slots:
+                            key = (interviewer_id, s.date, s.time_start)
+                            if key not in valid_slot_keys:
+                                # Слот отсутствует в актуальном листе — можно удалять только если он свободен и нет записи
+                                if s.is_available:
+                                    # Проверим отсутствие активной записи на всякий случай
+                                    existing_interview_stmt = select(Interview).where(
+                                        Interview.time_slot_id == s.id,
+                                        Interview.status.in_(['confirmed', 'pending'])
+                                    )
+                                    existing_interview_res = await session.execute(existing_interview_stmt)
+                                    existing_interview = existing_interview_res.scalars().first()
+                                    if not existing_interview:
+                                        session.delete(s)
+                                        stale_deleted += 1
+                    if stale_deleted:
+                        await session.commit()
+                        print(f"🧹 Удалено устаревших свободных слотов: {stale_deleted}")
+            except Exception as e:
+                print(f"⚠️ Ошибка очистки устаревших слотов: {e}")
             
             # Формируем сообщение со статистикой
             stats_message = (
@@ -395,27 +512,18 @@ async def sobes_start(message: types.Message, state: FSMContext):
             person_result = await session.execute(person_stmt)
             person = person_result.scalars().first()
         
-        # Определяем факультет
-        user_faculty = None
-        if person and person.faculty:
-            user_faculty = person.faculty.strip()
-        
-        if not user_faculty:
-            # Показываем выбор факультетов
-            faculties = ["СНиМК", "МЭО", "ФЭБ", "Юрфак", "ИТиАБД", "ФинФак", "НАБ", "ВШУ"]
-            
-            kb = InlineKeyboardBuilder()
-            for fac in faculties:
-                kb.row(InlineKeyboardButton(text=fac, callback_data=f"select_faculty:{fac}"))
-            
+        # Определяем факультет ТОЛЬКО из People. Если нет — запрещаем запись.
+        if not person or not person.faculty or not person.faculty.strip():
             await message.answer(
-                "🎓 Выберите ваш факультет:",
-                reply_markup=kb.as_markup()
+                "❌ Невозможно записаться: у вашей учётной записи не указан факультет в базе.\n\n"
+                "Пожалуйста, свяжитесь с администратором, чтобы вас добавили в раздел People с корректным факультетом."
             )
-            await state.set_state(BookingSobesStates.waiting_date)
+            await state.clear()
             return
-        
-        # Факультет определён - показываем доступные времена
+
+        user_faculty = person.faculty.strip()
+
+        # Факультет определён в People — показываем доступные времена только по нему
         await show_available_times(message, session, user_faculty, state)
 
 
@@ -443,8 +551,16 @@ async def show_available_times(message: types.Message, session, user_faculty: st
         await state.clear()
         return
     
-    # Берём первую дату (у каждого факультета только одна дата)
-    selected_date = available_slots[0].date
+    # Определяем дату строго по маппингу факультет → дата из конфигурации расписания
+    faculty_date_map = {}
+    for sheet_name, info in SCHEDULE_SHEETS.items():
+        for fac in info.get('faculties', []):
+            faculty_date_map[fac] = info.get('date')
+
+    selected_date = faculty_date_map.get(user_faculty)
+    if not selected_date:
+        # Фоллбэк, если в конфигурации нет записи — используем дату первого слота
+        selected_date = available_slots[0].date
     
     # Фильтруем слоты только на эту дату
     slots_for_date = [s for s in available_slots if s.date == selected_date]
@@ -493,12 +609,10 @@ async def show_available_times(message: types.Message, session, user_faculty: st
 
 @interview_router.callback_query(F.data.startswith('select_faculty:'))
 async def select_faculty_callback(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка выбора факультета."""
-    _, faculty = callback.data.split(':', 1)
-    
-    async with async_session_maker() as session:
-        await show_available_times(callback.message, session, faculty, state)
-    
+    """Отключено: выбор факультета запрещён — используется только факультет из People."""
+    await callback.message.edit_text(
+        "❌ Выбор факультета отключён. Запись доступна только для факультета, указанного в базе People."
+    )
     try:
         await callback.answer()
     except TelegramBadRequest:
