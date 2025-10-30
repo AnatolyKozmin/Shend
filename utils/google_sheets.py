@@ -5,6 +5,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 from typing import List, Dict, Optional
 import time
+import random
+from gspread.exceptions import APIError
 
 
 # URL таблицы с собеседующими
@@ -36,6 +38,28 @@ def get_google_sheets_client():
     
     client = gspread.authorize(creds)
     return client
+def _with_retries(callable_fn, *args, max_attempts: int = 5, base_delay: float = 0.8, **kwargs):
+    """Выполняет вызов Google Sheets API с экспоненциальным бэкоффом и джиттером."""
+    attempt = 0
+    while True:
+        try:
+            return callable_fn(*args, **kwargs)
+        except Exception as e:
+            # Определяем, имеет ли смысл ретраить
+            is_api_error = isinstance(e, APIError)
+            msg = str(e).lower()
+            retriable = is_api_error or any(s in msg for s in [
+                'rate limit', 'rate_limit', 'quota', '429', 'backendError', 'internal error', 'deadline', 'unavailable'
+            ])
+
+            attempt += 1
+            if not retriable or attempt >= max_attempts:
+                raise
+
+            # Экспоненциальный бэкофф с джиттером
+            delay = base_delay * (2 ** (attempt - 1))
+            delay = delay + random.uniform(0, 0.25)
+            time.sleep(delay)
 
 
 def get_interviewers_data() -> List[Dict[str, str]]:
@@ -188,7 +212,7 @@ def get_schedules_data() -> tuple[List[Dict[str, any]], Dict[str, int]]:
     
     try:
         client = get_google_sheets_client()
-        sheet = client.open_by_key(SCHEDULE_SHEET_ID)
+        sheet = _with_retries(client.open_by_key, SCHEDULE_SHEET_ID)
         
         print("🔄 Начинаю парсинг расписания из Google Sheets...")
         
@@ -303,13 +327,13 @@ def export_interviews_to_sheet(interviews_data: List[Dict[str, str]]) -> bool:
         
         # Пытаемся получить лист WORK
         try:
-            worksheet = sheet.worksheet('WORK')
+            worksheet = _with_retries(sheet.worksheet, 'WORK')
             print("📋 Лист WORK найден, очищаю...")
-            worksheet.clear()
-        except:
+            _with_retries(worksheet.clear)
+        except Exception:
             # Если листа нет - создаём
             print("📋 Лист WORK не найден, создаю...")
-            worksheet = sheet.add_worksheet(title='WORK', rows=1000, cols=10)
+            worksheet = _with_retries(sheet.add_worksheet, title='WORK', rows=1000, cols=10)
         
         # Заголовки
         headers = [
@@ -338,10 +362,10 @@ def export_interviews_to_sheet(interviews_data: List[Dict[str, str]]) -> bool:
             ])
         
         # Записываем данные
-        worksheet.update('A1', rows)
+        _with_retries(worksheet.update, 'A1', rows)
         
         # Форматируем заголовок (жирный шрифт)
-        worksheet.format('A1:H1', {
+        _with_retries(worksheet.format, 'A1:H1', {
             'textFormat': {'bold': True},
             'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
         })
@@ -353,3 +377,58 @@ def export_interviews_to_sheet(interviews_data: List[Dict[str, str]]) -> bool:
         print(f"❌ Ошибка экспорта в Google Sheets: {e}")
         return False
 
+
+def append_interview_to_work(row: Dict[str, str]) -> bool:
+    """
+    Добавляет одну запись в лист WORK. Создаёт лист и заголовки при отсутствии.
+
+    Ожидаемые ключи row:
+      - candidate_name
+      - interviewer_name
+      - time
+      - faculty
+      - date (необязательно)
+    """
+    try:
+        client = get_google_sheets_client()
+        sheet = _with_retries(client.open_by_key, SCHEDULE_SHEET_ID)
+
+        # Пытаемся получить лист WORK
+        try:
+            worksheet = _with_retries(sheet.worksheet, 'WORK')
+        except Exception:
+            worksheet = _with_retries(sheet.add_worksheet, title='WORK', rows=1000, cols=10)
+            # Поставим заголовки при создании
+            headers = [
+                'Кандидат',
+                'Факультет',
+                'Дата',
+                'Время',
+                'Собеседующий',
+                'ID собеседующего',
+                'Статус',
+                'Дата записи'
+            ]
+            _with_retries(worksheet.update, 'A1', [headers])
+            _with_retries(worksheet.format, 'A1:H1', {
+                'textFormat': {'bold': True},
+                'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+            })
+
+        # Сформируем строку в том же порядке, что и экспорт
+        values = [
+            row.get('candidate_name', 'Не указано'),
+            row.get('faculty', 'Не указан'),
+            row.get('date', ''),
+            row.get('time', ''),
+            row.get('interviewer_name', 'Не указан'),
+            row.get('interviewer_id', ''),
+            row.get('status', 'confirmed'),
+            row.get('created_at', '')
+        ]
+
+        _with_retries(worksheet.append_row, values, value_input_option='RAW')
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка добавления строки в WORK: {e}")
+        return False

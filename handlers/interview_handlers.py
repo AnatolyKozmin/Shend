@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, and_, or_
 from db.engine import async_session_maker
 from db.models import Interviewer, BotUser, TimeSlot, Interview, Person, InterviewMessage
-from utils.google_sheets import find_interviewer_by_code, get_schedules_data, export_interviews_to_sheet
+from utils.google_sheets import find_interviewer_by_code, get_schedules_data, export_interviews_to_sheet, append_interview_to_work
 from datetime import datetime
 import random
 
@@ -714,6 +714,35 @@ async def sobes_confirm_callback(callback: types.CallbackQuery, state: FSMContex
                 await callback.answer("✅ Запись создана!")
             except TelegramBadRequest:
                 pass
+            
+            # Добавляем запись в лист WORK (автоматически)
+            try:
+                candidate_name = "Не указано"
+                if bot_user.person_id:
+                    person_stmt = select(Person).where(Person.id == bot_user.person_id)
+                    person_result = await session.execute(person_stmt)
+                    person = person_result.scalars().first()
+                    if person:
+                        candidate_name = person.full_name
+                else:
+                    if bot_user and bot_user.telegram_username:
+                        candidate_name = f"@{bot_user.telegram_username}"
+
+                time_display = f"{slot.time_start}-{slot.time_end}"
+                created_at_formatted = interview.created_at.strftime("%Y-%m-%d %H:%M") if interview.created_at else ""
+
+                append_interview_to_work({
+                    'candidate_name': candidate_name,
+                    'faculty': user_faculty or "Не указан",
+                    'date': slot.date,
+                    'time': time_display,
+                    'interviewer_name': interviewer.full_name if interviewer else "Не указан",
+                    'interviewer_id': interviewer.interviewer_sheet_id if interviewer else "",
+                    'status': interview.status,
+                    'created_at': created_at_formatted
+                })
+            except Exception as e:
+                print(f"⚠️ Не удалось добавить строку в WORK: {e}")
         
         except Exception as e:
             print(f"Ошибка при создании записи: {e}")
@@ -1302,4 +1331,14 @@ async def export_interviews_command(message: types.Message):
                 "❌ Ошибка при экспорте в Google Sheets.\n\n"
                 "Проверьте логи для подробностей."
             )
+@interview_router.message(Command('zapolnit'))
+async def zapolnit_command(message: types.Message):
+    """Алиас: создать и заполнить лист WORK всеми записями из БД (только для админа)."""
+    ADMIN_ID = 922109605  # TODO: вынести в конфиг
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Нет доступа. Команда только для администратора.")
+        return
+    # Переиспользуем логику экспорта
+    await export_interviews_command(message)
+
 
