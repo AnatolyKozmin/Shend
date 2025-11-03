@@ -42,7 +42,7 @@ class BotUser(Base):
 
 
 class CO(Base):
-	"""Campaign / рассылка (CO) - хранит параметры рассылки, текст и метаданные."""
+	f"""Campaign / рассылка (CO) - хранит параметры рассылки, текст и метаданные."""
 	__tablename__ = 'co_campaigns'
 
 	id = Column(Integer, primary_key=True, index=True)
@@ -56,7 +56,7 @@ class CO(Base):
 
 
 class COResponse(Base):
-	"""Ответ пользователя на кампанию (да/нет)."""
+	f"""Ответ пользователя на кампанию (да/нет)."""
 	__tablename__ = 'co_responses'
 
 	id = Column(Integer, primary_key=True, index=True)
@@ -70,7 +70,7 @@ class COResponse(Base):
 
 
 class Reserv(Base):
-	"""Резервная таблица для рассылок - данные из res.xlsx."""
+	f"""Резервная таблица для рассылок - данные из res.xlsx."""
 	__tablename__ = 'reserv'
 	__table_args__ = (
 		UniqueConstraint('telegram_username', name='uq_reserv_telegram_username'),
@@ -91,7 +91,7 @@ class Reserv(Base):
 
 
 class Interviewer(Base):
-	"""Собеседующие - те, кто проводит собеседования."""
+	f"""Собеседующие - те, кто проводит собеседования."""
 	__tablename__ = 'interviewers'
 
 	id = Column(Integer, primary_key=True, index=True)
@@ -113,7 +113,7 @@ class Interviewer(Base):
 
 
 class TimeSlot(Base):
-	"""Временные слоты для собеседований."""
+	f"""Временные слоты для собеседований."""
 	__tablename__ = 'time_slots'
 
 	id = Column(Integer, primary_key=True, index=True)
@@ -134,7 +134,7 @@ class TimeSlot(Base):
 
 
 class Interview(Base):
-	"""Записи на собеседования."""
+	f"""Записи на собеседования."""
 	__tablename__ = 'interviews'
 
 	id = Column(Integer, primary_key=True, index=True)
@@ -161,7 +161,7 @@ class Interview(Base):
 
 
 class InterviewMessage(Base):
-	"""Сообщения между студентом и собеседующим."""
+	f"""Сообщения между студентом и собеседующим."""
 	__tablename__ = 'interview_messages'
 
 	id = Column(Integer, primary_key=True, index=True)
@@ -178,3 +178,48 @@ class InterviewMessage(Base):
 
 	def __repr__(self) -> str:
 		return f"<InterviewMessage(id={self.id!r}, from={self.from_user_id!r}, to={self.to_user_id!r})>"
+
+
+class ReservTimeSlot(Base):
+	"""Временные слоты для новой системы резерва (листы 'резерв' и 'финфак')."""
+	__tablename__ = 'reserv_time_slots'
+
+	id = Column(Integer, primary_key=True, index=True)
+	interviewer_id = Column(Integer, ForeignKey('interviewers.id'), nullable=False)
+	sheet_name = Column(String(50), nullable=False)  # 'резерв' или 'финфак'
+	date = Column(String(10), nullable=False)  # Формат: YYYY-MM-DD
+	time_start = Column(String(5), nullable=False)  # Формат: HH:MM
+	time_end = Column(String(5), nullable=False)  # Формат: HH:MM
+	is_available = Column(Boolean, default=True)
+	google_sheet_sync = Column(DateTime(timezone=True), nullable=True)  # Последняя синхронизация
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	# Связи
+	interviewer = relationship('Interviewer', foreign_keys=[interviewer_id])
+
+	def __repr__(self) -> str:
+		return f"<ReservTimeSlot(id={self.id!r}, sheet={self.sheet_name!r}, date={self.date!r}, time={self.time_start}-{self.time_end})>"
+
+
+class ReservBooking(Base):
+	"""Записи на собеседования для новой системы резерва."""
+	__tablename__ = 'reserv_bookings'
+
+	id = Column(Integer, primary_key=True, index=True)
+	time_slot_id = Column(Integer, ForeignKey('reserv_time_slots.id'), nullable=False, unique=True)
+	interviewer_id = Column(Integer, ForeignKey('interviewers.id'), nullable=False)
+	bot_user_id = Column(Integer, ForeignKey('bot_users.id'), nullable=False)
+	person_id = Column(Integer, ForeignKey('people.id'), nullable=True)
+	sheet_name = Column(String(50), nullable=False)  # 'резерв' или 'финфак'
+	status = Column(String(20), default='confirmed')  # confirmed/cancelled
+	notes = Column(String(1000), nullable=True)
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	# Связи
+	time_slot = relationship('ReservTimeSlot')
+	interviewer = relationship('Interviewer', foreign_keys=[interviewer_id])
+	bot_user = relationship('BotUser')
+	person = relationship('Person')
+
+	def __repr__(self) -> str:
+		return f"<ReservBooking(id={self.id!r}, sheet={self.sheet_name!r}, status={self.status!r})>"

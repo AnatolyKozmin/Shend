@@ -1,4 +1,4 @@
-"""
+f"""
 Вспомогательные функции для работы с Telegram API
 """
 from aiogram.types import CallbackQuery
@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 
 async def safe_answer_callback(callback: CallbackQuery, text: str = None, show_alert: bool = False) -> bool:
-    """
+    f"""
     Безопасный вызов callback.answer() с обработкой ошибки "query too old".
     
     Args:
