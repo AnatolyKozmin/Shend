@@ -342,8 +342,8 @@ async def finfak_booking_start(message: types.Message, state: FSMContext):
             
             await message.answer(
                 f"⚠️ У вас уже есть запись на собеседование!\n\n"
-                f"⏰ Время: {slot.time_start if slot else 'неизвестно'}\n"
-                f"👤 Собеседующий: {interviewer.full_name if interviewer else 'неизвестен'}\n\n"
+                f"📆 Дата: 07.11.2025\n"
+                f"⏰ Время: {slot.time_start if slot else 'неизвестно'}\n\n"
                 f"❗️ Записаться можно только один раз."
             )
             return
@@ -420,9 +420,8 @@ async def show_finfak_slots(message: types.Message, session, bot_user: BotUser, 
     kb = InlineKeyboardBuilder()
     
     for time_key in sorted(available_times.keys()):
-        count = available_times[time_key]
         kb.row(InlineKeyboardButton(
-            text=f"🕐 {time_key} (свободно: {count})",
+            text=f"🕐 {time_key}",
             callback_data=f"finfak_time:{time_key}"
         ))
     
@@ -565,21 +564,30 @@ async def finfak_confirm_callback(callback: types.CallbackQuery, state: FSMConte
             slot.is_available = False
             session.add(slot)
             
+            # Flush для получения ID
+            await session.flush()
+            booking_id = booking.id
+            
             await session.commit()
+            
+            # Refresh объектов для использования вне сессии
+            await session.refresh(booking)
+            await session.refresh(slot)
+            await session.refresh(interviewer)
+            await session.refresh(person)
             
             # Кнопка "Задать вопрос"
             kb = InlineKeyboardBuilder()
             kb.row(InlineKeyboardButton(
                 text="❓ Задать вопрос собеседующему",
-                callback_data=f"ask_finfak:{booking.id}"
+                callback_data=f"ask_finfak:{booking_id}"
             ))
             
             # Отправляем подтверждение кандидату
             await callback.message.edit_text(
                 f"✅ Запись успешно создана!\n\n"
                 f"📆 Дата: 07.11.2025\n"
-                f"⏰ Время: {selected_time}\n"
-                f"👤 Собеседующий: {interviewer.full_name if interviewer else 'Будет сообщено дополнительно'}\n\n"
+                f"⏰ Время: {selected_time}\n\n"
                 f"До встречи на собеседовании!",
                 reply_markup=kb.as_markup()
             )
@@ -606,9 +614,9 @@ async def finfak_confirm_callback(callback: types.CallbackQuery, state: FSMConte
                     await bot.send_message(interviewer.telegram_id, notification_text)
                 except Exception as e:
                     print(f"Ошибка отправки уведомления собеседующему: {e}")
-            
+        
             # Экспорт в Google Sheets (асинхронно, с задержкой)
-            # Запускаем в фоне, чтобы не блокировать ответ пользователю
+            # Запускаем ВНЕ сессии, чтобы не было проблем с detached объектами
             asyncio.create_task(
                 export_finfak_booking_to_sheets(booking, slot, interviewer, person)
             )
@@ -687,8 +695,8 @@ async def reserv_booking_start(message: types.Message, state: FSMContext):
             
             await message.answer(
                 f"⚠️ У вас уже есть запись на собеседование!\n\n"
-                f"⏰ Время: {slot.time_start if slot else 'неизвестно'}\n"
-                f"👤 Собеседующий: {interviewer.full_name if interviewer else 'неизвестен'}\n\n"
+                f"📆 Дата: 08.11.2025\n"
+                f"⏰ Время: {slot.time_start if slot else 'неизвестно'}\n\n"
                 f"❗️ Записаться можно только один раз."
             )
             return
@@ -765,9 +773,8 @@ async def show_reserv_slots(message: types.Message, session, bot_user: BotUser, 
     kb = InlineKeyboardBuilder()
     
     for time_key in sorted(available_times.keys()):
-        count = available_times[time_key]
         kb.row(InlineKeyboardButton(
-            text=f"🕐 {time_key} (свободно: {count})",
+            text=f"🕐 {time_key}",
             callback_data=f"reserv_time:{time_key}"
         ))
     
@@ -910,21 +917,30 @@ async def reserv_confirm_callback(callback: types.CallbackQuery, state: FSMConte
             slot.is_available = False
             session.add(slot)
             
+            # Flush для получения ID
+            await session.flush()
+            booking_id = booking.id
+            
             await session.commit()
+            
+            # Refresh объектов для использования вне сессии
+            await session.refresh(booking)
+            await session.refresh(slot)
+            await session.refresh(interviewer)
+            await session.refresh(person)
             
             # Кнопка "Задать вопрос"
             kb = InlineKeyboardBuilder()
             kb.row(InlineKeyboardButton(
                 text="❓ Задать вопрос собеседующему",
-                callback_data=f"ask_reserv:{booking.id}"
+                callback_data=f"ask_reserv:{booking_id}"
             ))
             
             # Отправляем подтверждение кандидату
             await callback.message.edit_text(
                 f"✅ Запись успешно создана!\n\n"
                 f"📆 Дата: 08.11.2025\n"
-                f"⏰ Время: {selected_time}\n"
-                f"👤 Собеседующий: {interviewer.full_name if interviewer else 'Будет сообщено дополнительно'}\n\n"
+                f"⏰ Время: {selected_time}\n\n"
                 f"До встречи на собеседовании!",
                 reply_markup=kb.as_markup()
             )
@@ -951,9 +967,9 @@ async def reserv_confirm_callback(callback: types.CallbackQuery, state: FSMConte
                     await bot.send_message(interviewer.telegram_id, notification_text)
                 except Exception as e:
                     print(f"Ошибка отправки уведомления собеседующему: {e}")
-            
+        
             # Экспорт в Google Sheets (асинхронно, с задержкой)
-            # Запускаем в фоне, чтобы не блокировать ответ пользователю
+            # Запускаем ВНЕ сессии, чтобы не было проблем с detached объектами
             asyncio.create_task(
                 export_reserv_booking_to_sheets(booking, slot, interviewer, person)
             )
