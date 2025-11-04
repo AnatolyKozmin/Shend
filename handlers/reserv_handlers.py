@@ -44,11 +44,6 @@ class ReservBookingStates(StatesGroup):
     waiting_confirmation = State()
 
 
-class QuestionStates(StatesGroup):
-    """Состояния для отправки вопроса собеседующему."""
-    waiting_question = State()
-
-
 async def _parse_sheet_common(message: types.Message, sheet_name: str):
     """
     Общая функция для парсинга листа.
@@ -564,10 +559,6 @@ async def finfak_confirm_callback(callback: types.CallbackQuery, state: FSMConte
             slot.is_available = False
             session.add(slot)
             
-            # Flush для получения ID
-            await session.flush()
-            booking_id = booking.id
-            
             await session.commit()
             
             # Refresh объектов для использования вне сессии
@@ -576,20 +567,13 @@ async def finfak_confirm_callback(callback: types.CallbackQuery, state: FSMConte
             await session.refresh(interviewer)
             await session.refresh(person)
             
-            # Кнопка "Задать вопрос"
-            kb = InlineKeyboardBuilder()
-            kb.row(InlineKeyboardButton(
-                text="❓ Задать вопрос собеседующему",
-                callback_data=f"ask_finfak:{booking_id}"
-            ))
-            
             # Отправляем подтверждение кандидату
             await callback.message.edit_text(
                 f"✅ Запись успешно создана!\n\n"
                 f"📆 Дата: 07.11.2025\n"
                 f"⏰ Время: {selected_time}\n\n"
-                f"До встречи на собеседовании!",
-                reply_markup=kb.as_markup()
+                f"Скоро собеседующий с вами свяжется.\n\n"
+                f"До встречи на собеседовании!"
             )
             
             # Отправляем уведомление собеседующему
@@ -917,10 +901,6 @@ async def reserv_confirm_callback(callback: types.CallbackQuery, state: FSMConte
             slot.is_available = False
             session.add(slot)
             
-            # Flush для получения ID
-            await session.flush()
-            booking_id = booking.id
-            
             await session.commit()
             
             # Refresh объектов для использования вне сессии
@@ -929,20 +909,13 @@ async def reserv_confirm_callback(callback: types.CallbackQuery, state: FSMConte
             await session.refresh(interviewer)
             await session.refresh(person)
             
-            # Кнопка "Задать вопрос"
-            kb = InlineKeyboardBuilder()
-            kb.row(InlineKeyboardButton(
-                text="❓ Задать вопрос собеседующему",
-                callback_data=f"ask_reserv:{booking_id}"
-            ))
-            
             # Отправляем подтверждение кандидату
             await callback.message.edit_text(
                 f"✅ Запись успешно создана!\n\n"
                 f"📆 Дата: 08.11.2025\n"
                 f"⏰ Время: {selected_time}\n\n"
-                f"До встречи на собеседовании!",
-                reply_markup=kb.as_markup()
+                f"Скоро собеседующий с вами свяжется.\n\n"
+                f"До встречи на собеседовании!"
             )
             
             # Отправляем уведомление собеседующему
@@ -984,180 +957,6 @@ async def reserv_confirm_callback(callback: types.CallbackQuery, state: FSMConte
             print(f"Ошибка при создании записи: {e}")
             await callback.message.edit_text(
                 "❌ Произошла ошибка при создании записи.\n\n"
-                "Попробуйте позже или обратитесь к администратору."
-            )
-            await state.clear()
-
-
-# ========================================
-# ВОПРОСЫ СОБЕСЕДУЮЩЕМУ
-# ========================================
-
-@reserv_router.callback_query(F.data.startswith('ask_finfak:'))
-async def ask_finfak_question(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка кнопки 'Задать вопрос' для финфака."""
-    _, booking_id = callback.data.split(':', 1)
-    
-    try:
-        booking_id = int(booking_id)
-    except:
-        await callback.answer("❌ Ошибка: неверный ID записи")
-        return
-    
-    # Сохраняем ID записи и тип в state
-    await state.update_data(
-        booking_id=booking_id,
-        booking_type="finfak"
-    )
-    
-    await callback.message.answer(
-        "❓ Задайте ваш вопрос собеседующему:\n\n"
-        "Напишите ваш вопрос в следующем сообщении."
-    )
-    
-    await state.set_state(QuestionStates.waiting_question)
-    
-    try:
-        await callback.answer()
-    except:
-        pass
-
-
-@reserv_router.callback_query(F.data.startswith('ask_reserv:'))
-async def ask_reserv_question(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка кнопки 'Задать вопрос' для резерва."""
-    _, booking_id = callback.data.split(':', 1)
-    
-    try:
-        booking_id = int(booking_id)
-    except:
-        await callback.answer("❌ Ошибка: неверный ID записи")
-        return
-    
-    # Сохраняем ID записи и тип в state
-    await state.update_data(
-        booking_id=booking_id,
-        booking_type="reserv"
-    )
-    
-    await callback.message.answer(
-        "❓ Задайте ваш вопрос собеседующему:\n\n"
-        "Напишите ваш вопрос в следующем сообщении."
-    )
-    
-    await state.set_state(QuestionStates.waiting_question)
-    
-    try:
-        await callback.answer()
-    except:
-        pass
-
-
-@reserv_router.message(QuestionStates.waiting_question)
-async def process_question(message: types.Message, state: FSMContext):
-    """Обработка вопроса от кандидата."""
-    question_text = message.text
-    
-    if not question_text or len(question_text.strip()) == 0:
-        await message.answer("❌ Пожалуйста, напишите ваш вопрос текстом.")
-        return
-    
-    if len(question_text) > 1000:
-        await message.answer("❌ Вопрос слишком длинный. Максимум 1000 символов.")
-        return
-    
-    # Получаем данные из state
-    data = await state.get_data()
-    booking_id = data.get('booking_id')
-    booking_type = data.get('booking_type')
-    
-    if not booking_id or not booking_type:
-        await message.answer("❌ Ошибка: данные потеряны. Попробуйте снова.")
-        await state.clear()
-        return
-    
-    # Получаем информацию о записи
-    async with async_session_maker() as session:
-        try:
-            # Определяем модели в зависимости от типа
-            if booking_type == "finfak":
-                BookingModel = FinfakBooking
-                TimeSlotModel = FinfakTimeSlot
-                booking_type_name = "Финфак"
-                booking_date = "07.11.2025"
-            else:  # reserv
-                BookingModel = ReservBooking
-                TimeSlotModel = ReservTimeSlot
-                booking_type_name = "Резерв"
-                booking_date = "08.11.2025"
-            
-            # Получаем запись
-            booking_stmt = select(BookingModel).where(BookingModel.id == booking_id)
-            booking_result = await session.execute(booking_stmt)
-            booking = booking_result.scalars().first()
-            
-            if not booking:
-                await message.answer("❌ Запись не найдена.")
-                await state.clear()
-                return
-            
-            # Получаем слот
-            slot_stmt = select(TimeSlotModel).where(TimeSlotModel.id == booking.time_slot_id)
-            slot_result = await session.execute(slot_stmt)
-            slot = slot_result.scalars().first()
-            
-            # Получаем собеседующего
-            interviewer_stmt = select(Interviewer).where(Interviewer.id == booking.interviewer_id)
-            interviewer_result = await session.execute(interviewer_stmt)
-            interviewer = interviewer_result.scalars().first()
-            
-            # Получаем данные кандидата
-            person_stmt = select(Person).where(Person.id == booking.person_id)
-            person_result = await session.execute(person_stmt)
-            person = person_result.scalars().first()
-            
-            if not interviewer or not interviewer.telegram_id:
-                await message.answer("❌ Не удалось отправить вопрос: данные собеседующего не найдены.")
-                await state.clear()
-                return
-            
-            # Форматируем username кандидата
-            candidate_username = person.telegram_username if person and person.telegram_username else "не указан"
-            if candidate_username != "не указан" and not candidate_username.startswith('@'):
-                candidate_username = f"@{candidate_username}"
-            
-            # Отправляем вопрос собеседующему
-            notification_text = (
-                f"❓ Вопрос от кандидата:\n\n"
-                f"👤 ФИО: {person.full_name if person else 'Неизвестен'}\n"
-                f"📱 Telegram: {candidate_username}\n"
-                f"📋 Тип: {booking_type_name}\n"
-                f"📅 Дата: {booking_date}\n"
-                f"⏰ Время записи: {slot.time_start if slot else 'неизвестно'}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💬 Вопрос:\n{question_text}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Вы можете ответить кандидату напрямую в Telegram: {candidate_username}"
-            )
-            
-            bot = message.bot
-            await bot.send_message(interviewer.telegram_id, notification_text)
-            
-            # Подтверждение кандидату
-            await message.answer(
-                "✅ Ваш вопрос отправлен собеседующему!\n\n"
-                "Собеседующий свяжется с вами в Telegram для ответа."
-            )
-            
-            await state.clear()
-        
-        except Exception as e:
-            print(f"Ошибка отправки вопроса: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            await message.answer(
-                "❌ Произошла ошибка при отправке вопроса.\n\n"
                 "Попробуйте позже или обратитесь к администратору."
             )
             await state.clear()
