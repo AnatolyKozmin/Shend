@@ -137,7 +137,7 @@ def parse_reserv_sheets(sheet_names: List[str] = None) -> Tuple[List[Dict], Dict
                 print(f"📋 Заголовок листа (первая строка):")
                 print(f"   Колонка A: '{header_row[0] if len(header_row) > 0 else 'пусто'}'")
                 
-                # Выводим времена из заголовка
+                # Выводим времена из заголовка (все без сокращений)
                 times_in_header = []
                 for col_idx in range(1, min(19, len(header_row))):  # B-S (индексы 1-18)
                     cell_value = header_row[col_idx].strip()
@@ -145,7 +145,7 @@ def parse_reserv_sheets(sheet_names: List[str] = None) -> Tuple[List[Dict], Dict
                         times_in_header.append(f"{TIME_SLOTS_MAP.get(col_idx, '?')} ({cell_value})")
                 
                 if times_in_header:
-                    print(f"   Времена: {', '.join(times_in_header[:5])}..." if len(times_in_header) > 5 else f"   Времена: {', '.join(times_in_header)}")
+                    print(f"   Времена: {', '.join(times_in_header)}")
                 else:
                     print(f"   ⚠️ Времена в заголовке не найдены")
                 
@@ -228,10 +228,8 @@ def parse_reserv_sheets(sheet_names: List[str] = None) -> Tuple[List[Dict], Dict
                         }
                         interviewer_stats[interviewer_sheet_id]['total'] += slots_count
                         
-                        # Выводим информацию
-                        times_str = ', '.join(slot_times[:5])
-                        if len(slot_times) > 5:
-                            times_str += f" ... (+{len(slot_times) - 5})"
+                        # Выводим информацию (ВСЕ времена без сокращений)
+                        times_str = ', '.join(slot_times)
                         
                         print(f"   ✅ Строка {row_idx + 1}: {interviewer_name} (ID: {interviewer_sheet_id})")
                         print(f"      Слотов: {slots_count} | Времена: {times_str}")
@@ -302,9 +300,8 @@ def format_stats_message(interviewer_stats: Dict[str, Dict]) -> str:
             slots = sheet_data['slots']
             times = sheet_data['times']
             
-            times_str = ', '.join(times[:5])
-            if len(times) > 5:
-                times_str += f" ... (+{len(times) - 5})"
+            # Выводим ВСЕ времена без сокращений
+            times_str = ', '.join(times)
             
             message += f"   📄 {sheet_name}: {slots} слотов\n"
             message += f"      ⏰ {times_str}\n"

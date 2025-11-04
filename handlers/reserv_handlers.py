@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, and_, delete
 from db.engine import async_session_maker
-from db.models import Interviewer, BotUser, Person, ReservTimeSlot, ReservBooking
+from db.models import Interviewer, BotUser, Person, ReservTimeSlot, ReservBooking, FinfakTimeSlot, FinfakBooking
 from utils.reserv_parser import parse_reserv_sheets, format_stats_message
 from datetime import datetime
 
@@ -18,23 +18,30 @@ reserv_router = Router()
 ADMIN_ID = 922109605  # TODO: вынести в конфиг
 
 
-@reserv_router.message(Command('parse_reserv'))
-async def parse_reserv_command(message: types.Message):
+async def _parse_sheet_common(message: types.Message, sheet_name: str):
     """
-    Команда для парсинга листов 'резерв' и 'финфак' из Google Sheets.
-    Доступна только администратору.
+    Общая функция для парсинга листа.
     
-    Выводит детальную информацию о процессе парсинга и статистику.
+    Args:
+        message: Сообщение от пользователя
+        sheet_name: Имя листа для парсинга ('резерв' или 'финфак')
     """
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Нет доступа. Команда только для администратора.")
+    # Определяем модели для каждого листа
+    if sheet_name == "резерв":
+        TimeSlotModel = ReservTimeSlot
+        BookingModel = ReservBooking
+    elif sheet_name == "финфак":
+        TimeSlotModel = FinfakTimeSlot
+        BookingModel = FinfakBooking
+    else:
+        await message.answer(f"❌ Неизвестный лист: {sheet_name}")
         return
     
-    await message.answer("🔄 Начинаю парсинг листов 'резерв' и 'финфак'...\n\nЭто может занять несколько секунд...")
+    await message.answer(f"🔄 Начинаю парсинг листа '{sheet_name}'...\n\nЭто может занять несколько секунд...")
     
     try:
-        # Парсим Google Sheets
-        slots_data, interviewer_stats = parse_reserv_sheets()
+        # Парсим указанный лист
+        slots_data, interviewer_stats = parse_reserv_sheets(sheet_names=[sheet_name])
         
         if not slots_data:
             await message.answer(
@@ -54,8 +61,8 @@ async def parse_reserv_command(message: types.Message):
             errors = 0
             
             # Множество для отслеживания валидных слотов
-            valid_slot_keys = set()  # (interviewer_id, sheet_name, date, time_start)
-            touched_interviewers = {}  # {interviewer_id: sheet_names}
+            valid_slot_keys = set()  # (interviewer_id, date, time_start)
+            touched_interviewers = set()  # {interviewer_id}
             
             for slot_info in slots_data:
                 try:
@@ -71,17 +78,14 @@ async def parse_reserv_command(message: types.Message):
                         skipped += 1
                         continue
                     
-                    # Отслеживаем какие листы затронуты для каждого собеседующего
-                    if interviewer.id not in touched_interviewers:
-                        touched_interviewers[interviewer.id] = set()
-                    touched_interviewers[interviewer.id].add(slot_info['sheet_name'])
+                    # Отслеживаем затронутых собеседующих
+                    touched_interviewers.add(interviewer.id)
                     
                     # Проверяем, есть ли уже такой слот
-                    existing_slot_stmt = select(ReservTimeSlot).where(
-                        ReservTimeSlot.interviewer_id == interviewer.id,
-                        ReservTimeSlot.sheet_name == slot_info['sheet_name'],
-                        ReservTimeSlot.date == slot_info['date'],
-                        ReservTimeSlot.time_start == slot_info['time_start']
+                    existing_slot_stmt = select(TimeSlotModel).where(
+                        TimeSlotModel.interviewer_id == interviewer.id,
+                        TimeSlotModel.date == slot_info['date'],
+                        TimeSlotModel.time_start == slot_info['time_start']
                     )
                     existing_slot_result = await session.execute(existing_slot_stmt)
                     existing_slot = existing_slot_result.scalars().first()
@@ -98,9 +102,8 @@ async def parse_reserv_command(message: types.Message):
                             skipped += 1
                     else:
                         # Создаем новый слот
-                        new_slot = ReservTimeSlot(
+                        new_slot = TimeSlotModel(
                             interviewer_id=interviewer.id,
-                            sheet_name=slot_info['sheet_name'],
                             date=slot_info['date'],
                             time_start=slot_info['time_start'],
                             time_end=slot_info['time_end'],
@@ -113,7 +116,6 @@ async def parse_reserv_command(message: types.Message):
                     # Добавляем ключ валидного слота
                     valid_slot_keys.add((
                         interviewer.id,
-                        slot_info['sheet_name'],
                         slot_info['date'],
                         slot_info['time_start']
                     ))
@@ -128,32 +130,30 @@ async def parse_reserv_command(message: types.Message):
             # Очистка: удаляем устаревшие свободные слоты
             stale_deleted = 0
             try:
-                for interviewer_id, sheet_names in touched_interviewers.items():
-                    for sheet_name in sheet_names:
-                        # Получаем все слоты этого собеседующего на этом листе
-                        slots_stmt = select(ReservTimeSlot).where(
-                            ReservTimeSlot.interviewer_id == interviewer_id,
-                            ReservTimeSlot.sheet_name == sheet_name
-                        )
-                        all_slots_res = await session.execute(slots_stmt)
-                        all_slots = all_slots_res.scalars().all()
-                        
-                        for slot in all_slots:
-                            key = (interviewer_id, sheet_name, slot.date, slot.time_start)
-                            if key not in valid_slot_keys:
-                                # Слот отсутствует в актуальном листе
-                                if slot.is_available:
-                                    # Проверяем отсутствие активной записи
-                                    existing_booking_stmt = select(ReservBooking).where(
-                                        ReservBooking.time_slot_id == slot.id,
-                                        ReservBooking.status == 'confirmed'
-                                    )
-                                    existing_booking_res = await session.execute(existing_booking_stmt)
-                                    existing_booking = existing_booking_res.scalars().first()
-                                    
-                                    if not existing_booking:
-                                        await session.delete(slot)
-                                        stale_deleted += 1
+                for interviewer_id in touched_interviewers:
+                    # Получаем все слоты этого собеседующего
+                    slots_stmt = select(TimeSlotModel).where(
+                        TimeSlotModel.interviewer_id == interviewer_id
+                    )
+                    all_slots_res = await session.execute(slots_stmt)
+                    all_slots = all_slots_res.scalars().all()
+                    
+                    for slot in all_slots:
+                        key = (interviewer_id, slot.date, slot.time_start)
+                        if key not in valid_slot_keys:
+                            # Слот отсутствует в актуальном листе
+                            if slot.is_available:
+                                # Проверяем отсутствие активной записи
+                                existing_booking_stmt = select(BookingModel).where(
+                                    BookingModel.time_slot_id == slot.id,
+                                    BookingModel.status == 'confirmed'
+                                )
+                                existing_booking_res = await session.execute(existing_booking_stmt)
+                                existing_booking = existing_booking_res.scalars().first()
+                                
+                                if not existing_booking:
+                                    await session.delete(slot)
+                                    stale_deleted += 1
                 
                 if stale_deleted > 0:
                     await session.commit()
@@ -219,4 +219,34 @@ async def parse_reserv_command(message: types.Message):
             "• Правильность credentials\n"
             "• Структуру таблицы"
         )
+
+
+@reserv_router.message(Command('parse_reserv'))
+async def parse_reserv_command(message: types.Message):
+    """
+    Команда для парсинга листа 'резерв' из Google Sheets.
+    Доступна только администратору.
+    
+    Выводит детальную информацию о процессе парсинга и статистику.
+    """
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Нет доступа. Команда только для администратора.")
+        return
+    
+    await _parse_sheet_common(message, "резерв")
+
+
+@reserv_router.message(Command('parse_finfak'))
+async def parse_finfak_command(message: types.Message):
+    """
+    Команда для парсинга листа 'финфак' из Google Sheets.
+    Доступна только администратору.
+    
+    Выводит детальную информацию о процессе парсинга и статистику.
+    """
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Нет доступа. Команда только для администратора.")
+        return
+    
+    await _parse_sheet_common(message, "финфак")
 

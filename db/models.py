@@ -181,12 +181,11 @@ class InterviewMessage(Base):
 
 
 class ReservTimeSlot(Base):
-	"""Временные слоты для новой системы резерва (листы 'резерв' и 'финфак')."""
+	"""Временные слоты для листа 'резерв'."""
 	__tablename__ = 'reserv_time_slots'
 
 	id = Column(Integer, primary_key=True, index=True)
 	interviewer_id = Column(Integer, ForeignKey('interviewers.id'), nullable=False)
-	sheet_name = Column(String(50), nullable=False)  # 'резерв' или 'финфак'
 	date = Column(String(10), nullable=False)  # Формат: YYYY-MM-DD
 	time_start = Column(String(5), nullable=False)  # Формат: HH:MM
 	time_end = Column(String(5), nullable=False)  # Формат: HH:MM
@@ -198,11 +197,11 @@ class ReservTimeSlot(Base):
 	interviewer = relationship('Interviewer', foreign_keys=[interviewer_id])
 
 	def __repr__(self) -> str:
-		return f"<ReservTimeSlot(id={self.id!r}, sheet={self.sheet_name!r}, date={self.date!r}, time={self.time_start}-{self.time_end})>"
+		return f"<ReservTimeSlot(id={self.id!r}, date={self.date!r}, time={self.time_start}-{self.time_end})>"
 
 
 class ReservBooking(Base):
-	"""Записи на собеседования для новой системы резерва."""
+	"""Записи на собеседования для листа 'резерв'."""
 	__tablename__ = 'reserv_bookings'
 
 	id = Column(Integer, primary_key=True, index=True)
@@ -210,7 +209,6 @@ class ReservBooking(Base):
 	interviewer_id = Column(Integer, ForeignKey('interviewers.id'), nullable=False)
 	bot_user_id = Column(Integer, ForeignKey('bot_users.id'), nullable=False)
 	person_id = Column(Integer, ForeignKey('people.id'), nullable=True)
-	sheet_name = Column(String(50), nullable=False)  # 'резерв' или 'финфак'
 	status = Column(String(20), default='confirmed')  # confirmed/cancelled
 	notes = Column(String(1000), nullable=True)
 	created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -222,4 +220,47 @@ class ReservBooking(Base):
 	person = relationship('Person')
 
 	def __repr__(self) -> str:
-		return f"<ReservBooking(id={self.id!r}, sheet={self.sheet_name!r}, status={self.status!r})>"
+		return f"<ReservBooking(id={self.id!r}, status={self.status!r})>"
+
+
+class FinfakTimeSlot(Base):
+	"""Временные слоты для листа 'финфак'."""
+	__tablename__ = 'finfak_time_slots'
+
+	id = Column(Integer, primary_key=True, index=True)
+	interviewer_id = Column(Integer, ForeignKey('interviewers.id'), nullable=False)
+	date = Column(String(10), nullable=False)  # Формат: YYYY-MM-DD
+	time_start = Column(String(5), nullable=False)  # Формат: HH:MM
+	time_end = Column(String(5), nullable=False)  # Формат: HH:MM
+	is_available = Column(Boolean, default=True)
+	google_sheet_sync = Column(DateTime(timezone=True), nullable=True)  # Последняя синхронизация
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	# Связи
+	interviewer = relationship('Interviewer', foreign_keys=[interviewer_id])
+
+	def __repr__(self) -> str:
+		return f"<FinfakTimeSlot(id={self.id!r}, date={self.date!r}, time={self.time_start}-{self.time_end})>"
+
+
+class FinfakBooking(Base):
+	"""Записи на собеседования для листа 'финфак'."""
+	__tablename__ = 'finfak_bookings'
+
+	id = Column(Integer, primary_key=True, index=True)
+	time_slot_id = Column(Integer, ForeignKey('finfak_time_slots.id'), nullable=False, unique=True)
+	interviewer_id = Column(Integer, ForeignKey('interviewers.id'), nullable=False)
+	bot_user_id = Column(Integer, ForeignKey('bot_users.id'), nullable=False)
+	person_id = Column(Integer, ForeignKey('people.id'), nullable=True)
+	status = Column(String(20), default='confirmed')  # confirmed/cancelled
+	notes = Column(String(1000), nullable=True)
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	# Связи
+	time_slot = relationship('FinfakTimeSlot')
+	interviewer = relationship('Interviewer', foreign_keys=[interviewer_id])
+	bot_user = relationship('BotUser')
+	person = relationship('Person')
+
+	def __repr__(self) -> str:
+		return f"<FinfakBooking(id={self.id!r}, status={self.status!r})>"
