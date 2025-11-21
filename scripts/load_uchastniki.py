@@ -14,6 +14,15 @@ Usage:
 """
 import asyncio
 import sys
+import os
+from pathlib import Path
+
+# Добавляем корневую директорию проекта в sys.path
+# Это нужно для того, чтобы модули db.* были доступны
+script_dir = Path(__file__).parent
+project_root = script_dir.parent
+sys.path.insert(0, str(project_root))
+
 import pandas as pd
 from sqlalchemy import select, func
 from db.engine import async_session_maker
@@ -39,23 +48,27 @@ async def load_uchastniki_from_excel(update_existing=False):
         update_existing: Если True, обновляет существующие записи вместо пропуска
     """
     
+    # Определяем путь к файлу (в корне проекта)
+    excel_path = project_root / 'uchast.xlsx'
+    
     # Читаем Excel файл
     try:
         # Пробуем прочитать с заголовками
-        df = pd.read_excel('uchast.xlsx')
+        df = pd.read_excel(str(excel_path))
         
         # Проверяем, есть ли правильные заголовки
         if 'ФИО' not in df.columns:
             # Если заголовков нет, читаем заново без заголовков
             print("⚠️ Заголовки не найдены, читаю без заголовков...")
             # Предполагаем порядок: ФИО, Курс, Факультет, telegram_username
-            df = pd.read_excel('uchast.xlsx', header=None, names=['ФИО', 'Курс', 'Факультет', 'telegram_username'])
+            df = pd.read_excel(str(excel_path), header=None, names=['ФИО', 'Курс', 'Факультет', 'telegram_username'])
         
         print(f"✅ Прочитано {len(df)} строк из uchast.xlsx")
         print(f"📋 Колонки: {df.columns.tolist()}")
     except FileNotFoundError:
-        print("❌ Файл uchast.xlsx не найден!")
-        print("💡 Убедитесь, что файл находится в корне проекта")
+        print(f"❌ Файл uchast.xlsx не найден!")
+        print(f"💡 Ожидаемый путь: {excel_path}")
+        print("💡 Убедитесь, что файл находится в корне проекта (рядом с main.py)")
         return
     except Exception as e:
         print(f"❌ Ошибка при чтении файла: {e}")

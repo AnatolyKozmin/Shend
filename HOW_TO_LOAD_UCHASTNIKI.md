@@ -39,8 +39,8 @@ docker-compose exec bot alembic upgrade head
 #### Вариант 1: Обычный режим (рекомендуется для первого раза)
 
 ```bash
-# Из корня проекта
-cd /Users/katusha/Desktop/Shend-1
+# Из корня проекта (на сервере)
+cd /root/Shend
 
 # Запустить импорт
 docker-compose exec bot python scripts/load_uchastniki.py
@@ -51,6 +51,8 @@ docker-compose exec bot python scripts/load_uchastniki.py
 ```bash
 docker-compose exec bot python scripts/load_uchastniki.py --update
 ```
+
+**Важно:** Скрипт автоматически найдёт файл `uchast.xlsx` в корне проекта (рядом с `main.py`).
 
 ### Шаг 4: Проверить результат
 
@@ -105,11 +107,14 @@ FROM uchastniki;
 
 **Решение:**
 ```bash
-# Убедитесь, что файл находится в корне проекта
-ls -la /Users/katusha/Desktop/Shend-1/uchast.xlsx
+# На сервере: убедитесь, что файл находится в корне проекта
+ls -la /root/Shend/uchast.xlsx
 
 # Если файл в другом месте, скопируйте его:
-cp /путь/к/файлу/uchast.xlsx /Users/katusha/Desktop/Shend-1/
+cp /путь/к/файлу/uchast.xlsx /root/Shend/
+
+# Или загрузите через scp с локальной машины:
+# scp uchast.xlsx root@YOUR_SERVER:/root/Shend/
 ```
 
 ### Проблема 2: "Container not found"
@@ -138,6 +143,18 @@ docker-compose exec bot alembic upgrade head
 # Пересобрать контейнер (pandas должен быть в requirements.txt)
 docker-compose build
 docker-compose up -d
+```
+
+### Проблема 5: "ModuleNotFoundError: No module named 'db'"
+
+**Решение:**
+Эта проблема уже исправлена в скрипте. Если всё ещё возникает:
+```bash
+# Убедитесь, что вы запускаете из корня проекта
+cd /root/Shend
+
+# Запустите скрипт снова
+docker-compose exec bot python scripts/load_uchastniki.py
 ```
 
 ## 📊 Что происходит при импорте
