@@ -137,11 +137,18 @@ async def load_uchastniki_from_excel(update_existing=False):
                 
                 # Проверка по telegram_username (если есть)
                 if telegram_username_norm:
-                    stmt = select(Uchastnik).where(
-                        func.lower(Uchastnik.telegram_username) == telegram_username_norm
-                    )
-                    result = await session.execute(stmt)
-                    existing = result.scalars().first()
+                    try:
+                        stmt = select(Uchastnik).where(
+                            func.lower(Uchastnik.telegram_username) == telegram_username_norm
+                        )
+                        result = await session.execute(stmt)
+                        existing = result.scalars().first()
+                    except Exception as e:
+                        # Если ошибка в транзакции, делаем rollback и продолжаем
+                        await session.rollback()
+                        print(f"⚠️ Строка {index + 2}: ошибка при проверке username для '{full_name}': {e}")
+                        errors += 1
+                        continue
                     
                     if existing:
                         if update_existing:
@@ -158,7 +165,13 @@ async def load_uchastniki_from_excel(update_existing=False):
                                 linked_with_bot += 1
                             
                             session.add(existing)
-                            updated += 1
+                            try:
+                                await session.commit()
+                                updated += 1
+                            except Exception as e:
+                                await session.rollback()
+                                print(f"❌ Строка {index + 2}: ошибка при обновлении '{full_name}': {e}")
+                                errors += 1
                             continue
                         else:
                             print(f"⚠️ Строка {index + 2}: пользователь с telegram @{telegram_username_norm} уже существует, пропускаем")
@@ -167,9 +180,16 @@ async def load_uchastniki_from_excel(update_existing=False):
                 
                 # Проверка по ФИО (если username не было или не нашли)
                 if not existing:
-                    stmt_name = select(Uchastnik).where(Uchastnik.full_name == full_name)
-                    result_name = await session.execute(stmt_name)
-                    existing = result_name.scalars().first()
+                    try:
+                        stmt_name = select(Uchastnik).where(Uchastnik.full_name == full_name)
+                        result_name = await session.execute(stmt_name)
+                        existing = result_name.scalars().first()
+                    except Exception as e:
+                        # Если ошибка в транзакции, делаем rollback и продолжаем
+                        await session.rollback()
+                        print(f"⚠️ Строка {index + 2}: ошибка при проверке ФИО для '{full_name}': {e}")
+                        errors += 1
+                        continue
                     
                     if existing:
                         if update_existing:
@@ -185,7 +205,13 @@ async def load_uchastniki_from_excel(update_existing=False):
                                 linked_with_bot += 1
                             
                             session.add(existing)
-                            updated += 1
+                            try:
+                                await session.commit()
+                                updated += 1
+                            except Exception as e:
+                                await session.rollback()
+                                print(f"❌ Строка {index + 2}: ошибка при обновлении '{full_name}': {e}")
+                                errors += 1
                             continue
                         else:
                             print(f"⚠️ Строка {index + 2}: пользователь с ФИО '{full_name}' уже существует, пропускаем")
@@ -207,38 +233,40 @@ async def load_uchastniki_from_excel(update_existing=False):
                 )
                 
                 session.add(uchastnik)
-                added += 1
-                
-                if tg_id:
-                    print(f"✅ Строка {index + 2}: добавлен '{full_name}' с tg_id={tg_id}")
-                else:
-                    print(f"✅ Строка {index + 2}: добавлен '{full_name}' (без tg_id)")
+                try:
+                    await session.commit()
+                    added += 1
+                    if tg_id:
+                        print(f"✅ Строка {index + 2}: добавлен '{full_name}' с tg_id={tg_id}")
+                    else:
+                        print(f"✅ Строка {index + 2}: добавлен '{full_name}' (без tg_id)")
+                except Exception as e:
+                    await session.rollback()
+                    print(f"❌ Строка {index + 2}: ошибка при добавлении '{full_name}': {e}")
+                    errors += 1
                 
             except Exception as e:
+                # Общая обработка ошибок - делаем rollback и продолжаем
+                try:
+                    await session.rollback()
+                except:
+                    pass
                 print(f"❌ Ошибка при обработке строки {index + 2}: {e}")
-                import traceback
-                traceback.print_exc()
                 errors += 1
         
-        # Сохраняем все изменения
-        try:
-            await session.commit()
-            print(f"\n{'='*50}")
-            print(f"✅ Загрузка завершена!")
-            print(f"{'='*50}")
-            print(f"📊 Статистика:")
-            print(f"   ✅ Добавлено новых: {added}")
-            print(f"   🔄 Обновлено: {updated}")
-            print(f"   ⏭️  Пропущено: {skipped}")
-            print(f"   🔗 Связано с BotUser: {linked_with_bot}")
-            print(f"   ❌ Ошибок: {errors}")
-            print(f"   📈 Всего обработано: {added + updated + skipped}")
-            print(f"{'='*50}")
-        except Exception as e:
-            await session.rollback()
-            print(f"❌ Ошибка при сохранении в БД: {e}")
-            import traceback
-            traceback.print_exc()
+        # Все изменения уже сохранены (коммиты делались после каждой записи)
+        # Просто выводим статистику
+        print(f"\n{'='*50}")
+        print(f"✅ Загрузка завершена!")
+        print(f"{'='*50}")
+        print(f"📊 Статистика:")
+        print(f"   ✅ Добавлено новых: {added}")
+        print(f"   🔄 Обновлено: {updated}")
+        print(f"   ⏭️  Пропущено: {skipped}")
+        print(f"   🔗 Связано с BotUser: {linked_with_bot}")
+        print(f"   ❌ Ошибок: {errors}")
+        print(f"   📈 Всего обработано: {added + updated + skipped + errors}")
+        print(f"{'='*50}")
 
 
 if __name__ == '__main__':
