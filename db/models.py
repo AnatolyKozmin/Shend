@@ -264,3 +264,22 @@ class FinfakBooking(Base):
 
 	def __repr__(self) -> str:
 		return f"<FinfakBooking(id={self.id!r}, status={self.status!r})>"
+
+
+class Uchastnik(Base):
+	"""Участники - новая схема для участников из uchast.xlsx."""
+	__tablename__ = 'uchastniki'
+	__table_args__ = (
+		UniqueConstraint('telegram_username', name='uq_uchastniki_telegram_username'),
+	)
+
+	id = Column(Integer, primary_key=True, index=True)
+	full_name = Column(String(255), nullable=False)
+	course = Column(String(128), nullable=True)
+	faculty = Column(String(255), nullable=True)
+	telegram_username = Column(String(64), nullable=True)
+	tg_id = Column(BigInteger, nullable=True)  # ID из BotUser для рассылки
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+	def __repr__(self) -> str:
+		return f"<Uchastnik(id={self.id!r}, full_name={self.full_name!r}, telegram={self.telegram_username!r}, tg_id={self.tg_id!r})>"
