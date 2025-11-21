@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = '002'
-down_revision = None  # Будет установлено после merge
+down_revision = '001'  # Связываем с миграцией 001
 branch_labels = None
 depends_on = None
 

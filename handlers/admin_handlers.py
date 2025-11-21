@@ -7,6 +7,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters.state import StateFilter
 from aiogram.exceptions import TelegramBadRequest
 import asyncio
+import pandas as pd
+from pathlib import Path
 from sqlalchemy import select, func
 from db.engine import async_session_maker
 from db.models import CO, COResponse, Person, BotUser, Reserv, Uchastnik
@@ -1148,4 +1150,195 @@ async def uch_rass_send(message: types.Message, state: FSMContext):
     
     await message.answer(stats_text)
     await state.clear()
+
+
+@admin_router.message(Command(commands=['uchsoc']))
+async def uchsoc_check(message: types.Message):
+    """Проверка сопоставления участников из uchast.xlsx с BotUser по telegram_username."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
+        return
+    
+    # Определяем путь к файлу (в корне проекта)
+    # В Docker контейнере это будет /app/uchast.xlsx
+    # Локально это будет корень проекта
+    try:
+        # Пробуем найти файл относительно текущего файла
+        project_root = Path(__file__).parent.parent
+        excel_path = project_root / 'uchast.xlsx'
+        
+        # Если не найден, пробуем абсолютный путь для Docker
+        if not excel_path.exists():
+            excel_path = Path('/app/uchast.xlsx')
+    except:
+        excel_path = Path('/app/uchast.xlsx')
+    
+    # Проверяем наличие файла
+    if not excel_path.exists():
+        await message.answer(
+            f"❌ Файл uchast.xlsx не найден!\n\n"
+            f"💡 Ожидаемый путь: {excel_path}\n"
+            f"💡 Убедитесь, что файл находится в корне проекта (рядом с main.py)"
+        )
+        return
+    
+    await message.answer("🔄 Читаю файл uchast.xlsx и проверяю сопоставление с BotUser...")
+    
+    try:
+        # Читаем Excel файл
+        try:
+            df = pd.read_excel(str(excel_path))
+            
+            # Проверяем, есть ли правильные заголовки
+            if 'ФИО' not in df.columns:
+                # Если заголовков нет, читаем заново без заголовков
+                df = pd.read_excel(str(excel_path), header=None, names=['ФИО', 'Курс', 'Факультет', 'telegram_username'])
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при чтении файла: {e}")
+            return
+        
+        # Нормализуем username
+        def normalize_username(raw):
+            if pd.isna(raw) or not raw:
+                return None
+            s = str(raw).strip()
+            if not s:
+                return None
+            if s.startswith('@'):
+                s = s[1:]
+            return s.lower()
+        
+        # Получаем всех BotUser для сопоставления
+        async with async_session_maker() as session:
+            bot_users_stmt = select(BotUser).where(BotUser.telegram_username.isnot(None))
+            bot_users_result = await session.execute(bot_users_stmt)
+            bot_users = bot_users_result.scalars().all()
+            
+            # Создаём словарь для быстрого поиска: username -> tg_id
+            username_to_tg_id = {}
+            for bu in bot_users:
+                if bu.telegram_username:
+                    norm_username = normalize_username(bu.telegram_username)
+                    if norm_username:
+                        username_to_tg_id[norm_username] = bu.tg_id
+        
+        # Обрабатываем участников из Excel
+        found_count = 0
+        not_found_count = 0
+        found_list = []
+        not_found_list = []
+        
+        for index, row in df.iterrows():
+            # Получаем ФИО
+            full_name = row.get('ФИО')
+            if pd.isna(full_name):
+                continue
+            
+            full_name = str(full_name).strip()
+            
+            # Получаем telegram_username
+            telegram_username = row.get('telegram_username') if 'telegram_username' in df.columns else None
+            telegram_username_norm = normalize_username(telegram_username)
+            
+            # Проверяем, есть ли в BotUser
+            if telegram_username_norm and telegram_username_norm in username_to_tg_id:
+                tg_id = username_to_tg_id[telegram_username_norm]
+                found_count += 1
+                found_list.append({
+                    'name': full_name,
+                    'username': telegram_username_norm,
+                    'tg_id': tg_id
+                })
+            else:
+                not_found_count += 1
+                not_found_list.append({
+                    'name': full_name,
+                    'username': telegram_username_norm or 'нет username'
+                })
+        
+        # Формируем статистику
+        total = len(df)
+        stats_text = (
+            f"📊 Статистика сопоставления участников\n\n"
+            f"{'='*30}\n"
+            f"📋 Всего в Excel: {total} чел.\n\n"
+            f"✅ Найдено в BotUser: {found_count} чел.\n"
+            f"❌ Не найдено в BotUser: {not_found_count} чел.\n\n"
+        )
+        
+        if found_count > 0:
+            percentage = (found_count / total) * 100
+            stats_text += f"📈 Процент найденных: {percentage:.1f}%\n"
+        
+        stats_text += f"{'='*30}"
+        
+        await message.answer(stats_text)
+        
+        # Показываем список найденных (первые 20)
+        if found_list:
+            found_text = f"✅ Найдено в боте ({found_count} чел.):\n\n"
+            for item in found_list[:20]:
+                found_text += f"• {item['name']} (@{item['username']}) - tg_id: {item['tg_id']}\n"
+            
+            if len(found_list) > 20:
+                found_text += f"\n... и ещё {len(found_list) - 20} чел."
+            
+            # Разбиваем на части если длинно
+            if len(found_text) > 4000:
+                parts = []
+                current = "✅ Найдено в боте:\n\n"
+                for item in found_list:
+                    line = f"• {item['name']} (@{item['username']}) - tg_id: {item['tg_id']}\n"
+                    if len(current + line) > 4000:
+                        parts.append(current)
+                        current = line
+                    else:
+                        current += line
+                if current:
+                    parts.append(current)
+                
+                for part in parts:
+                    await message.answer(part)
+            else:
+                await message.answer(found_text)
+        
+        # Показываем список не найденных (первые 20)
+        if not_found_list:
+            not_found_text = f"❌ Не найдено в боте ({not_found_count} чел.):\n\n"
+            for item in not_found_list[:20]:
+                username_display = f"@{item['username']}" if item['username'] != 'нет username' else "нет username"
+                not_found_text += f"• {item['name']} ({username_display})\n"
+            
+            if len(not_found_list) > 20:
+                not_found_text += f"\n... и ещё {len(not_found_list) - 20} чел."
+            
+            # Разбиваем на части если длинно
+            if len(not_found_text) > 4000:
+                parts = []
+                current = "❌ Не найдено в боте:\n\n"
+                for item in not_found_list:
+                    username_display = f"@{item['username']}" if item['username'] != 'нет username' else "нет username"
+                    line = f"• {item['name']} ({username_display})\n"
+                    if len(current + line) > 4000:
+                        parts.append(current)
+                        current = line
+                    else:
+                        current += line
+                if current:
+                    parts.append(current)
+                
+                for part in parts:
+                    await message.answer(part)
+            else:
+                await message.answer(not_found_text)
+        
+    except Exception as e:
+        await message.answer(
+            f"❌ Ошибка при обработке файла:\n{str(e)}\n\n"
+            f"Проверьте:\n"
+            f"• Что файл uchast.xlsx существует\n"
+            f"• Что файл имеет правильную структуру (колонка ФИО обязательна)"
+        )
+        import traceback
+        traceback.print_exc()
 
