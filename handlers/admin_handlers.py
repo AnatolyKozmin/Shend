@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 import asyncio
 from sqlalchemy import select, func
 from db.engine import async_session_maker
-from db.models import CO, COResponse, Person, BotUser, Reserv
+from db.models import CO, COResponse, Person, BotUser, Reserv, Uchastnik
 
 
 admin_router = Router()
@@ -40,6 +40,11 @@ class ReservRassStates(StatesGroup):
 
 class DODepReservStates(StatesGroup):
     waiting_faculty = State()
+    waiting_text = State()
+
+
+class UchastnikiRassStates(StatesGroup):
+    """Состояния для рассылки участникам."""
     waiting_text = State()
 
 
@@ -1012,4 +1017,135 @@ async def stats_res(message: types.Message):
         # Если ни в одном факультете нет ответов
         if not has_answers:
             await message.answer('❌ Пока нет ответов на рассылки из Reserv.')
+
+
+@admin_router.message(Command(commands=['uch_rass']))
+async def uch_rass_start(message: types.Message, state: FSMContext):
+    """Команда для рассылки участникам из таблицы uchastniki (только тем, у кого есть tg_id)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
+        return
+
+    # Проверяем количество участников с tg_id и без
+    async with async_session_maker() as session:
+        # Участники с tg_id (могут получить рассылку)
+        stmt_with_tg = select(func.count(Uchastnik.id)).where(Uchastnik.tg_id.isnot(None))
+        result_with_tg = await session.execute(stmt_with_tg)
+        count_with_tg = result_with_tg.scalar() or 0
+        
+        # Всего участников
+        stmt_total = select(func.count(Uchastnik.id))
+        result_total = await session.execute(stmt_total)
+        count_total = result_total.scalar() or 0
+        
+        count_without_tg = count_total - count_with_tg
+        
+        if count_with_tg == 0:
+            await message.answer(
+                "❌ В таблице участников нет ни одного пользователя с tg_id.\n\n"
+                f"📊 Всего участников в базе: {count_total}\n"
+                f"📊 С tg_id (могут получить рассылку): {count_with_tg}\n"
+                f"📊 Без tg_id (не в боте): {count_without_tg}\n\n"
+                "Убедитесь, что:\n"
+                "• Данные импортированы из uchast.xlsx\n"
+                "• Участники связаны с BotUser (есть telegram_username в обеих таблицах)"
+            )
+            return
+
+    await state.set_state(UchastnikiRassStates.waiting_text)
+    await message.answer(
+        f"📢 Рассылка участникам\n\n"
+        f"📊 Статистика:\n"
+        f"   📋 Всего участников: {count_total}\n"
+        f"   ✅ С tg_id (получат рассылку): {count_with_tg}\n"
+        f"   ⚠️  Без tg_id (не получат): {count_without_tg}\n\n"
+        f"Пришлите текст сообщения, которое нужно разослать {count_with_tg} участникам:"
+    )
+
+
+@admin_router.message(StateFilter(UchastnikiRassStates.waiting_text))
+async def uch_rass_send(message: types.Message, state: FSMContext):
+    """Отправка рассылки участникам."""
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    text = message.text
+
+    if not text or not text.strip():
+        await message.answer("❌ Текст сообщения не может быть пустым. Попробуйте снова:")
+        return
+
+    async with async_session_maker() as session:
+        # Получаем всех участников с tg_id
+        stmt = select(Uchastnik).where(Uchastnik.tg_id.isnot(None))
+        result = await session.execute(stmt)
+        recipients = result.scalars().all()
+
+    if not recipients:
+        await message.answer("❌ Не найдено участников с tg_id для рассылки.")
+        await state.clear()
+        return
+
+    await message.answer(f"🔄 Начинаю рассылку {len(recipients)} участникам...")
+
+    sent = 0
+    errors = 0
+    blocked = 0  # Заблокировали бота
+    not_found = 0  # Пользователь не найден
+    PAUSE_SECONDS = 0.1
+
+    for uchastnik in recipients:
+        try:
+            await message.bot.send_message(chat_id=uchastnik.tg_id, text=text)
+            sent += 1
+            await asyncio.sleep(PAUSE_SECONDS)
+        except TelegramBadRequest as e:
+            errors += 1
+            error_msg = str(e).lower()
+            if 'blocked' in error_msg or 'chat not found' in error_msg:
+                blocked += 1
+            elif 'user not found' in error_msg or 'bot was blocked' in error_msg:
+                not_found += 1
+        except Exception as e:
+            errors += 1
+            print(f"Ошибка отправки для {uchastnik.tg_id} ({uchastnik.full_name}): {e}")
+
+    # Формируем детальную статистику
+    total = len(recipients)
+    other_errors = errors - blocked - not_found
+    
+    stats_text = (
+        f"✅ Рассылка участникам завершена!\n\n"
+        f"{'='*30}\n"
+        f"📊 СТАТИСТИКА РАССЫЛКИ\n"
+        f"{'='*30}\n\n"
+        f"📋 Всего участников с tg_id: {total}\n\n"
+        f"✅ Успешно отправлено: {sent}\n"
+    )
+    
+    # Детализация ошибок
+    if errors > 0:
+        stats_text += f"\n❌ Ошибок всего: {errors}\n"
+        if blocked > 0:
+            stats_text += f"   🚫 Заблокировали бота: {blocked}\n"
+        if not_found > 0:
+            stats_text += f"   👤 Пользователь не найден: {not_found}\n"
+        if other_errors > 0:
+            stats_text += f"   ⚠️  Другие ошибки: {other_errors}\n"
+    else:
+        stats_text += f"\n❌ Ошибок: 0\n"
+    
+    # Процент успешности
+    if total > 0:
+        percentage = (sent / total) * 100
+        stats_text += (
+            f"\n{'─'*30}\n"
+            f"📈 Успешность: {percentage:.1f}%\n"
+            f"📉 Не доставлено: {errors} ({100 - percentage:.1f}%)"
+        )
+    
+    stats_text += f"\n{'='*30}"
+    
+    await message.answer(stats_text)
+    await state.clear()
 
