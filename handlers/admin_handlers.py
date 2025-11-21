@@ -50,6 +50,12 @@ class UchastnikiRassStates(StatesGroup):
     waiting_text = State()
 
 
+class UchsocRassStates(StatesGroup):
+    """Состояния для рассылки участникам из Excel файла."""
+    waiting_text = State()
+    sending = State()  # Состояние во время рассылки (для возможности отмены)
+
+
 @admin_router.message(Command(commands=['create_rass']))
 async def create_rass(message: types.Message, state: FSMContext):
     # только админ
@@ -1343,4 +1349,314 @@ async def uchsoc_check(message: types.Message):
         )
         import traceback
         traceback.print_exc()
+
+
+@admin_router.message(Command(commands=['uchsoc_rass']))
+async def uchsoc_rass_start(message: types.Message, state: FSMContext):
+    """Команда для рассылки участникам из uchast.xlsx (всем, кто найден в BotUser)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
+        return
+    
+    # Определяем путь к файлу
+    try:
+        project_root = Path(__file__).parent.parent
+        excel_path = project_root / 'uchast.xlsx'
+        if not excel_path.exists():
+            excel_path = Path('/app/uchast.xlsx')
+    except:
+        excel_path = Path('/app/uchast.xlsx')
+    
+    # Проверяем наличие файла
+    if not excel_path.exists():
+        await message.answer(
+            f"❌ Файл uchast.xlsx не найден!\n\n"
+            f"💡 Ожидаемый путь: {excel_path}\n"
+            f"💡 Убедитесь, что файл находится в корне проекта (рядом с main.py)"
+        )
+        return
+    
+    await message.answer("🔄 Читаю файл uchast.xlsx и проверяю сопоставление с BotUser...")
+    
+    try:
+        # Читаем Excel файл
+        try:
+            df = pd.read_excel(str(excel_path))
+            if 'ФИО' not in df.columns:
+                df = pd.read_excel(str(excel_path), header=None, names=['ФИО', 'telegram_username'])
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при чтении файла: {e}")
+            return
+        
+        # Нормализуем username
+        def normalize_username(raw):
+            if pd.isna(raw) or not raw:
+                return None
+            s = str(raw).strip()
+            if not s:
+                return None
+            if s.startswith('@'):
+                s = s[1:]
+            return s.lower()
+        
+        # Получаем всех BotUser для сопоставления
+        async with async_session_maker() as session:
+            bot_users_stmt = select(BotUser).where(BotUser.telegram_username.isnot(None))
+            bot_users_result = await session.execute(bot_users_stmt)
+            bot_users = bot_users_result.scalars().all()
+            
+            username_to_tg_id = {}
+            for bu in bot_users:
+                if bu.telegram_username:
+                    norm_username = normalize_username(bu.telegram_username)
+                    if norm_username:
+                        username_to_tg_id[norm_username] = bu.tg_id
+        
+        # Формируем список получателей
+        recipients = []
+        for index, row in df.iterrows():
+            full_name = row.get('ФИО')
+            if pd.isna(full_name):
+                continue
+            
+            full_name = str(full_name).strip()
+            telegram_username = row.get('telegram_username') if 'telegram_username' in df.columns else None
+            telegram_username_norm = normalize_username(telegram_username)
+            
+            if telegram_username_norm and telegram_username_norm in username_to_tg_id:
+                recipients.append({
+                    'name': full_name,
+                    'username': telegram_username_norm,
+                    'tg_id': username_to_tg_id[telegram_username_norm]
+                })
+        
+        if not recipients:
+            await message.answer(
+                "❌ Не найдено ни одного участника из Excel в BotUser.\n\n"
+                "Убедитесь, что:\n"
+                "• В Excel файле указаны telegram_username\n"
+                "• Участники зарегистрированы в боте (есть в BotUser)"
+            )
+            return
+        
+        # Сохраняем список получателей в state
+        await state.update_data(recipients=recipients, total=len(recipients))
+        await state.set_state(UchsocRassStates.waiting_text)
+        
+        await message.answer(
+            f"📢 Рассылка участникам из Excel\n\n"
+            f"📊 Статистика:\n"
+            f"   📋 Всего в Excel: {len(df)} чел.\n"
+            f"   ✅ Найдено в BotUser: {len(recipients)} чел.\n"
+            f"   ❌ Не найдено: {len(df) - len(recipients)} чел.\n\n"
+            f"Пришлите текст сообщения, которое нужно разослать {len(recipients)} участникам:"
+        )
+        
+    except Exception as e:
+        await message.answer(
+            f"❌ Ошибка при обработке файла:\n{str(e)}\n\n"
+            f"Проверьте структуру файла."
+        )
+        import traceback
+        traceback.print_exc()
+
+
+@admin_router.message(StateFilter(UchsocRassStates.waiting_text))
+async def uchsoc_rass_send(message: types.Message, state: FSMContext):
+    """Отправка рассылки участникам из Excel."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    text = message.text
+    
+    if not text or not text.strip():
+        await message.answer("❌ Текст сообщения не может быть пустым. Попробуйте снова:")
+        return
+    
+    # Получаем список получателей из state
+    data = await state.get_data()
+    recipients = data.get('recipients', [])
+    total = data.get('total', 0)
+    
+    if not recipients:
+        await message.answer("❌ Список получателей пуст. Начните заново с /uchsoc_rass")
+        await state.clear()
+        return
+    
+    # Сохраняем текст и переходим в состояние отправки
+    await state.update_data(text=text, sent=0, errors=0, blocked=0, not_found=0, other_errors=0, cancelled=False)
+    await state.set_state(UchsocRassStates.sending)
+    
+    # Создаём клавиатуру с кнопкой отмены
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отменить рассылку", callback_data="cancel_uchsoc_rass"))
+    
+    status_msg = await message.answer(
+        f"🔄 Начинаю рассылку {len(recipients)} участникам...\n\n"
+        f"⏳ Отправлено: 0/{len(recipients)}\n"
+        f"✅ Успешно: 0\n"
+        f"❌ Ошибок: 0",
+        reply_markup=kb.as_markup()
+    )
+    
+    sent = 0
+    errors = 0
+    blocked = 0
+    not_found = 0
+    other_errors = 0
+    PAUSE_SECONDS = 0.1
+    
+    # Отправляем сообщения
+    for i, recipient in enumerate(recipients):
+        # Проверяем, не отменена ли рассылка
+        current_data = await state.get_data()
+        if current_data.get('cancelled', False):
+            await status_msg.edit_text(
+                f"❌ Рассылка отменена пользователем.\n\n"
+                f"📊 Статистика до отмены:\n"
+                f"   ✅ Успешно отправлено: {sent}\n"
+                f"   ❌ Ошибок: {errors}\n"
+                f"   ⏳ Осталось: {len(recipients) - i}"
+            )
+            await state.clear()
+            return
+        
+        try:
+            await message.bot.send_message(chat_id=recipient['tg_id'], text=text)
+            sent += 1
+            
+            # Обновляем статистику каждые 5 сообщений или в конце
+            if (i + 1) % 5 == 0 or i == len(recipients) - 1:
+                try:
+                    await status_msg.edit_text(
+                        f"🔄 Рассылка в процессе...\n\n"
+                        f"⏳ Отправлено: {i + 1}/{len(recipients)}\n"
+                        f"✅ Успешно: {sent}\n"
+                        f"❌ Ошибок: {errors}",
+                        reply_markup=kb.as_markup()
+                    )
+                except Exception:
+                    pass  # Игнорируем ошибки редактирования
+            
+            await asyncio.sleep(PAUSE_SECONDS)
+            
+        except TelegramBadRequest as e:
+            errors += 1
+            error_msg = str(e).lower()
+            if 'blocked' in error_msg or 'chat not found' in error_msg:
+                blocked += 1
+            elif 'user not found' in error_msg or 'bot was blocked' in error_msg:
+                not_found += 1
+            else:
+                other_errors += 1
+        except Exception as e:
+            errors += 1
+            other_errors += 1
+            print(f"Ошибка отправки для {recipient['tg_id']} ({recipient['name']}): {e}")
+    
+    # Формируем финальную статистику
+    total_sent = len(recipients)
+    other_errors = errors - blocked - not_found
+    
+    stats_text = (
+        f"✅ Рассылка участникам из Excel завершена!\n\n"
+        f"{'='*30}\n"
+        f"📊 СТАТИСТИКА РАССЫЛКИ\n"
+        f"{'='*30}\n\n"
+        f"📋 Всего получателей: {total_sent}\n\n"
+        f"✅ Успешно отправлено: {sent}\n"
+    )
+    
+    if errors > 0:
+        stats_text += f"\n❌ Ошибок всего: {errors}\n"
+        if blocked > 0:
+            stats_text += f"   🚫 Заблокировали бота: {blocked}\n"
+        if not_found > 0:
+            stats_text += f"   👤 Пользователь не найден: {not_found}\n"
+        if other_errors > 0:
+            stats_text += f"   ⚠️  Другие ошибки: {other_errors}\n"
+    else:
+        stats_text += f"\n❌ Ошибок: 0\n"
+    
+    if total_sent > 0:
+        percentage = (sent / total_sent) * 100
+        stats_text += (
+            f"\n{'─'*30}\n"
+            f"📈 Успешность: {percentage:.1f}%\n"
+            f"📉 Не доставлено: {errors} ({100 - percentage:.1f}%)"
+        )
+    
+    stats_text += f"\n{'='*30}"
+    
+    await status_msg.edit_text(stats_text)
+    await state.clear()
+
+
+@admin_router.callback_query(lambda c: c.data == 'cancel_uchsoc_rass')
+async def cancel_uchsoc_rass(callback: types.CallbackQuery, state: FSMContext):
+    """Отмена рассылки участникам из Excel через кнопку."""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+    
+    # Проверяем текущее состояние
+    current_state = await state.get_state()
+    if current_state != UchsocRassStates.sending:
+        await callback.answer("Нет активной рассылки для отмены", show_alert=True)
+        return
+    
+    # Помечаем рассылку как отменённую
+    await state.update_data(cancelled=True)
+    
+    await callback.message.edit_text(
+        "❌ Рассылка отменена.\n\n"
+        "Отправка новых сообщений прекращена."
+    )
+    
+    try:
+        await callback.answer("Рассылка отменена")
+    except TelegramBadRequest:
+        pass
+
+
+@admin_router.message(Command(commands=['cancel']))
+async def cancel_command(message: types.Message, state: FSMContext):
+    """Отмена текущего действия (включая рассылку)."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    current_state = await state.get_state()
+    
+    # Если идёт рассылка - отменяем её
+    if current_state == UchsocRassStates.sending:
+        await state.update_data(cancelled=True)
+        await message.answer("❌ Рассылка отменена. Отправка новых сообщений прекращена.")
+        return
+    
+    # Для других состояний рассылок - просто очищаем
+    if current_state in [
+        UchsocRassStates.waiting_text,
+        UchastnikiRassStates.waiting_text,
+        AllRassStates.waiting_text,
+        COCreateStates.waiting_text,
+        COCreateStates.waiting_faculty,
+        COCreateStates.waiting_presence,
+        DODepStates.waiting_text,
+        DODepStates.waiting_faculty,
+        ReservRassStates.waiting_text,
+        ReservRassStates.waiting_faculty,
+        ReservRassStates.waiting_presence,
+        DODepReservStates.waiting_text,
+        DODepReservStates.waiting_faculty
+    ]:
+        await state.clear()
+        await message.answer("❌ Действие отменено.")
+        return
+    
+    # Для других состояний - просто очищаем
+    if current_state is not None:
+        await state.clear()
+        await message.answer("❌ Действие отменено.")
+    else:
+        await message.answer("Нечего отменять.")
 
