@@ -1187,12 +1187,14 @@ async def uchsoc_check(message: types.Message):
     try:
         # Читаем Excel файл
         try:
+            # Пробуем прочитать с заголовками
             df = pd.read_excel(str(excel_path))
             
             # Проверяем, есть ли правильные заголовки
             if 'ФИО' not in df.columns:
                 # Если заголовков нет, читаем заново без заголовков
-                df = pd.read_excel(str(excel_path), header=None, names=['ФИО', 'Курс', 'Факультет', 'telegram_username'])
+                # Структура: 1-й столбец = ФИО, 2-й столбец = telegram_username (с @)
+                df = pd.read_excel(str(excel_path), header=None, names=['ФИО', 'telegram_username'])
         except Exception as e:
             await message.answer(f"❌ Ошибка при чтении файла: {e}")
             return
