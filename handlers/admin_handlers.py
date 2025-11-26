@@ -1,11 +1,11 @@
-from aiogram import Router, types
+from aiogram import Router, Bot, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters.state import StateFilter
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 import asyncio
 import pandas as pd
 from pathlib import Path
@@ -17,6 +17,47 @@ from db.models import CO, COResponse, Person, BotUser, Reserv, Uchastnik
 admin_router = Router()
 
 ADMIN_ID = 922109605
+
+
+MAX_RATE_LIMIT_RETRIES = 5
+
+
+async def _sleep_on_retry(exception: TelegramRetryAfter):
+    """Pause for the duration suggested by Telegram."""
+    wait_time = max(getattr(exception, "retry_after", 1), 1)
+    await asyncio.sleep(wait_time)
+
+
+async def safe_edit_message(status_msg: types.Message, text: str, reply_markup=None):
+    """Edit a telegram message with rate-limit retries."""
+    for attempt in range(MAX_RATE_LIMIT_RETRIES):
+        try:
+            await status_msg.edit_text(text, reply_markup=reply_markup)
+            return
+        except TelegramRetryAfter as retry_exc:
+            await _sleep_on_retry(retry_exc)
+        except TelegramBadRequest as bad_exc:
+            # Telegram может вернуть "message is not modified" – игнорируем.
+            if "message is not modified" in str(bad_exc).lower():
+                return
+            raise
+        except Exception as exc:
+            if attempt == MAX_RATE_LIMIT_RETRIES - 1:
+                raise exc
+            await asyncio.sleep(0.5)
+
+
+async def safe_send_message(bot: Bot, chat_id: int, text: str):
+    """Send a telegram message with flood control handling."""
+    for attempt in range(MAX_RATE_LIMIT_RETRIES):
+        try:
+            return await bot.send_message(chat_id=chat_id, text=text)
+        except TelegramRetryAfter as retry_exc:
+            await _sleep_on_retry(retry_exc)
+        except Exception as exc:
+            if attempt == MAX_RATE_LIMIT_RETRIES - 1:
+                raise exc
+            await asyncio.sleep(0.5)
 
 
 class COCreateStates(StatesGroup):
@@ -1511,24 +1552,25 @@ async def uchsoc_rass_send(message: types.Message, state: FSMContext):
         # Проверяем, не отменена ли рассылка
         current_data = await state.get_data()
         if current_data.get('cancelled', False):
-            await status_msg.edit_text(
+            await safe_edit_message(
                 f"❌ Рассылка отменена пользователем.\n\n"
                 f"📊 Статистика до отмены:\n"
                 f"   ✅ Успешно отправлено: {sent}\n"
                 f"   ❌ Ошибок: {errors}\n"
-                f"   ⏳ Осталось: {len(recipients) - i}"
+                f"   ⏳ Осталось: {len(recipients) - i}",
+                reply_markup=None
             )
             await state.clear()
             return
         
         try:
-            await message.bot.send_message(chat_id=recipient['tg_id'], text=text)
+            await safe_send_message(message.bot, chat_id=recipient['tg_id'], text=text)
             sent += 1
             
             # Обновляем статистику каждые 5 сообщений или в конце
             if (i + 1) % 5 == 0 or i == len(recipients) - 1:
                 try:
-                    await status_msg.edit_text(
+                    await safe_edit_message(
                         f"🔄 Рассылка в процессе...\n\n"
                         f"⏳ Отправлено: {i + 1}/{len(recipients)}\n"
                         f"✅ Успешно: {sent}\n"
@@ -1588,7 +1630,7 @@ async def uchsoc_rass_send(message: types.Message, state: FSMContext):
     
     stats_text += f"\n{'='*30}"
     
-    await status_msg.edit_text(stats_text)
+    await safe_edit_message(status_msg, stats_text)
     await state.clear()
 
 
