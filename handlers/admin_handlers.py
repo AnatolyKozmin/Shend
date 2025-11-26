@@ -60,6 +60,38 @@ async def safe_send_message(bot: Bot, chat_id: int, text: str):
             await asyncio.sleep(0.5)
 
 
+async def safe_send_file(bot: Bot, chat_id: int, text: str | None, file: dict):
+    """
+    Send a file (document/photo) with flood control handling.
+    file = {"type": "document" | "photo", "file_id": "..."}
+    """
+    caption = text or None
+    for attempt in range(MAX_RATE_LIMIT_RETRIES):
+        try:
+            if file.get("type") == "document":
+                return await bot.send_document(
+                    chat_id=chat_id,
+                    document=file.get("file_id"),
+                    caption=caption,
+                )
+            if file.get("type") == "photo":
+                return await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=file.get("file_id"),
+                    caption=caption,
+                )
+            # Если неизвестный тип – просто отправим текст, чтобы не падать.
+            if caption:
+                return await bot.send_message(chat_id=chat_id, text=caption)
+            return
+        except TelegramRetryAfter as retry_exc:
+            await _sleep_on_retry(retry_exc)
+        except Exception as exc:
+            if attempt == MAX_RATE_LIMIT_RETRIES - 1:
+                raise exc
+            await asyncio.sleep(0.5)
+
+
 class COCreateStates(StatesGroup):
     waiting_faculty = State()
     waiting_presence = State()
@@ -1490,7 +1522,10 @@ async def uchsoc_rass_start(message: types.Message, state: FSMContext):
             f"   📋 Всего в Excel: {len(df)} чел.\n"
             f"   ✅ Найдено в BotUser: {len(recipients)} чел.\n"
             f"   ❌ Не найдено: {len(df) - len(recipients)} чел.\n\n"
-            f"Пришлите текст сообщения, которое нужно разослать {len(recipients)} участникам:"
+            f"Пришлите сообщение для рассылки {len(recipients)} участникам:\n"
+            f"• можно просто текст\n"
+            f"• или текст + файл (документ/картинка)\n"
+            f"• или только файл с подписью в caption"
         )
         
     except Exception as e:
@@ -1507,11 +1542,32 @@ async def uchsoc_rass_send(message: types.Message, state: FSMContext):
     """Отправка рассылки участникам из Excel."""
     if message.from_user.id != ADMIN_ID:
         return
-    
-    text = message.text
-    
-    if not text or not text.strip():
-        await message.answer("❌ Текст сообщения не может быть пустым. Попробуйте снова:")
+
+    # Берём текст либо из обычного сообщения, либо из caption к файлу
+    raw_text = message.text or message.caption
+    text = (raw_text or "").strip() or None
+
+    # Поддержка файлов: документ или фото (берём самое большое по размеру)
+    file: dict | None = None
+    if message.document:
+        file = {
+            "type": "document",
+            "file_id": message.document.file_id,
+            "file_name": message.document.file_name,
+        }
+    elif message.photo:
+        biggest_photo = message.photo[-1]
+        file = {
+            "type": "photo",
+            "file_id": biggest_photo.file_id,
+        }
+
+    # Нельзя, чтобы и текст, и файл были пустыми
+    if not text and not file:
+        await message.answer(
+            "❌ Сообщение не может быть пустым.\n"
+            "Пришлите текст, файл или текст с файлом."
+        )
         return
     
     # Получаем список получателей из state
@@ -1524,8 +1580,17 @@ async def uchsoc_rass_send(message: types.Message, state: FSMContext):
         await state.clear()
         return
     
-    # Сохраняем текст и переходим в состояние отправки
-    await state.update_data(text=text, sent=0, errors=0, blocked=0, not_found=0, other_errors=0, cancelled=False)
+    # Сохраняем текст/файл и переходим в состояние отправки
+    await state.update_data(
+        text=text,
+        file=file,
+        sent=0,
+        errors=0,
+        blocked=0,
+        not_found=0,
+        other_errors=0,
+        cancelled=False,
+    )
     await state.set_state(UchsocRassStates.sending)
     
     # Создаём клавиатуру с кнопкой отмены
@@ -1547,6 +1612,11 @@ async def uchsoc_rass_send(message: types.Message, state: FSMContext):
     other_errors = 0
     PAUSE_SECONDS = 0.1
     
+    # Достаём данные сообщения (текст/файл), которые выбрал админ
+    base_data = await state.get_data()
+    broadcast_text = base_data.get("text")
+    broadcast_file = base_data.get("file")
+
     # Отправляем сообщения
     for i, recipient in enumerate(recipients):
         # Проверяем, не отменена ли рассылка
@@ -1564,7 +1634,21 @@ async def uchsoc_rass_send(message: types.Message, state: FSMContext):
             return
         
         try:
-            await safe_send_message(message.bot, chat_id=recipient['tg_id'], text=text)
+            # Если есть файл – отправляем файл + (опционально) подпись
+            if broadcast_file:
+                await safe_send_file(
+                    message.bot,
+                    chat_id=recipient["tg_id"],
+                    text=broadcast_text,
+                    file=broadcast_file,
+                )
+            else:
+                # Только текстовая рассылка
+                await safe_send_message(
+                    message.bot,
+                    chat_id=recipient["tg_id"],
+                    text=broadcast_text or "",
+                )
             sent += 1
             
             # Обновляем статистику каждые 5 сообщений или в конце
