@@ -1792,79 +1792,124 @@ async def test_autobus(message: types.Message):
     """Тестовая команда для проверки сопоставления участников с номерами автобусов.
     
     Логика:
-    1. Читаем autobus.xlsx (ФИО + номер автобуса)
-    2. Ищем каждого по ФИО в таблице Person
-    3. Получаем tg_id через связь с BotUser
-    4. Выводим пронумерованный список: ФИО, номер автобуса, tg_id
+    1. Читаем autobus.xlsx (ФИО + номер автобуса + опционально telegram_username)
+    2. Читаем uchast.xlsx (ФИО + telegram_username)
+    3. Сопоставляем по ФИО между файлами → ищем tg_id по username
+    4. Если не нашли — ищем по ФИО в Person
+    5. Если не нашли — проверяем 3-й столбик autobus.xlsx (username)
+    6. Выводим пронумерованный список: ФИО, номер автобуса, tg_id
     """
     if message.from_user.id != ADMIN_ID:
         await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
         return
     
-    # Определяем путь к файлу autobus.xlsx
+    # Определяем пути к файлам
     try:
         project_root = Path(__file__).parent.parent
-        excel_path = project_root / 'autobus.xlsx'
-        if not excel_path.exists():
-            excel_path = Path('/app/autobus.xlsx')
+        autobus_path = project_root / 'autobus.xlsx'
+        uchast_path = project_root / 'uchast.xlsx'
+        if not autobus_path.exists():
+            autobus_path = Path('/app/autobus.xlsx')
+        if not uchast_path.exists():
+            uchast_path = Path('/app/uchast.xlsx')
     except:
-        excel_path = Path('/app/autobus.xlsx')
+        autobus_path = Path('/app/autobus.xlsx')
+        uchast_path = Path('/app/uchast.xlsx')
     
-    # Проверяем наличие файла
-    if not excel_path.exists():
+    # Проверяем наличие файлов
+    if not autobus_path.exists():
         await message.answer(
             f"❌ Файл autobus.xlsx не найден!\n\n"
-            f"💡 Ожидаемый путь: {excel_path}\n"
-            f"💡 Убедитесь, что файл находится в корне проекта"
+            f"💡 Ожидаемый путь: {autobus_path}"
         )
         return
     
-    await message.answer("🔄 Читаю файл autobus.xlsx и сопоставляю с участниками...")
+    if not uchast_path.exists():
+        await message.answer(
+            f"❌ Файл uchast.xlsx не найден!\n\n"
+            f"💡 Ожидаемый путь: {uchast_path}"
+        )
+        return
+    
+    await message.answer("🔄 Читаю файлы autobus.xlsx и uchast.xlsx...")
     
     try:
-        # Читаем Excel файл
-        df = pd.read_excel(str(excel_path))
-        
-        # Определяем названия колонок
-        # Ищем колонку с ФИО
-        fio_col = None
-        bus_col = None
-        
-        for col in df.columns:
-            col_lower = str(col).lower()
-            if 'фио' in col_lower or 'имя' in col_lower or 'фамилия' in col_lower:
-                fio_col = col
-            if 'автобус' in col_lower or 'номер' in col_lower or 'bus' in col_lower:
-                bus_col = col
-        
-        # Если не нашли по названию, берём первые две колонки
-        if fio_col is None:
-            fio_col = df.columns[0]
-        if bus_col is None:
-            bus_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
-        
-        # Функция нормализации имени
+        # Функции нормализации
         def normalize_name(name):
             if pd.isna(name) or not name:
                 return None
             return str(name).strip().lower()
         
-        # Получаем всех Person и связанных BotUser из базы
+        def normalize_username(raw):
+            if pd.isna(raw) or not raw:
+                return None
+            s = str(raw).strip()
+            if not s:
+                return None
+            if s.startswith('@'):
+                s = s[1:]
+            return s.lower()
+        
+        # Читаем autobus.xlsx
+        df_autobus = pd.read_excel(str(autobus_path))
+        
+        # Определяем колонки в autobus.xlsx
+        # Столбец 1 = ФИО, Столбец 2 = номер автобуса, Столбец 3 = telegram username (опционально)
+        fio_col = df_autobus.columns[0]
+        bus_col = df_autobus.columns[1] if len(df_autobus.columns) > 1 else df_autobus.columns[0]
+        autobus_tg_col = df_autobus.columns[2] if len(df_autobus.columns) > 2 else None
+        
+        # Читаем uchast.xlsx
+        df_uchast = pd.read_excel(str(uchast_path))
+        
+        # Определяем колонки в uchast.xlsx
+        uchast_fio_col = None
+        uchast_tg_col = None
+        for col in df_uchast.columns:
+            col_lower = str(col).lower()
+            if 'фио' in col_lower or 'имя' in col_lower or 'фамилия' in col_lower:
+                uchast_fio_col = col
+            if 'telegram' in col_lower or 'tg' in col_lower or 'username' in col_lower or '@' in str(df_uchast[col].iloc[0] if len(df_uchast) > 0 else ''):
+                uchast_tg_col = col
+        if uchast_fio_col is None:
+            uchast_fio_col = df_uchast.columns[0]
+        if uchast_tg_col is None and len(df_uchast.columns) > 1:
+            uchast_tg_col = df_uchast.columns[1]
+        
+        # Создаём словарь ФИО -> username из uchast.xlsx
+        name_to_username = {}
+        for _, row in df_uchast.iterrows():
+            fio = row.get(uchast_fio_col)
+            username = row.get(uchast_tg_col) if uchast_tg_col else None
+            norm_fio = normalize_name(fio)
+            norm_username = normalize_username(username)
+            if norm_fio and norm_username:
+                name_to_username[norm_fio] = norm_username
+        
+        # Получаем данные из БД
         async with async_session_maker() as session:
-            # Получаем всех Person
+            # Получаем всех BotUser
+            bot_users_stmt = select(BotUser)
+            bot_users_result = await session.execute(bot_users_stmt)
+            bot_users = bot_users_result.scalars().all()
+            
+            # Словарь username -> tg_id
+            username_to_tg_id = {}
+            for bu in bot_users:
+                if bu.telegram_username:
+                    norm_username = normalize_username(bu.telegram_username)
+                    if norm_username:
+                        username_to_tg_id[norm_username] = bu.tg_id
+            
+            # Словарь person_id -> tg_id
+            person_id_to_tg_id = {bu.person_id: bu.tg_id for bu in bot_users if bu.person_id}
+            
+            # Получаем всех Person для fallback поиска по ФИО
             people_stmt = select(Person)
             people_result = await session.execute(people_stmt)
             people = people_result.scalars().all()
             
-            # Получаем всех BotUser с person_id
-            bot_users_stmt = select(BotUser).where(BotUser.person_id.isnot(None))
-            bot_users_result = await session.execute(bot_users_stmt)
-            bot_users = bot_users_result.scalars().all()
-            
-            # Создаём словарь person_id -> tg_id
-            person_id_to_tg_id = {bu.person_id: bu.tg_id for bu in bot_users}
-            
-            # Создаём словарь для поиска по ФИО (нормализованное)
+            # Словарь ФИО -> person
             name_to_person = {}
             for p in people:
                 norm_name = normalize_name(p.full_name)
@@ -1875,45 +1920,85 @@ async def test_autobus(message: types.Message):
         found_list = []
         not_found_list = []
         
-        for index, row in df.iterrows():
+        for _, row in df_autobus.iterrows():
             full_name = row.get(fio_col)
             bus_number = row.get(bus_col)
+            # Третий столбик - telegram username для проблемных случаев
+            direct_username = row.get(autobus_tg_col) if autobus_tg_col else None
             
             if pd.isna(full_name) or not str(full_name).strip():
                 continue
             
             full_name_str = str(full_name).strip()
             bus_number_str = str(bus_number).strip() if not pd.isna(bus_number) else "?"
-            
             norm_name = normalize_name(full_name_str)
+            norm_direct_username = normalize_username(direct_username)
             
-            if norm_name and norm_name in name_to_person:
+            tg_id = None
+            found_method = None
+            
+            # Способ 1: ищем username в uchast.xlsx, потом tg_id в BotUser
+            if norm_name and norm_name in name_to_username:
+                username = name_to_username[norm_name]
+                if username in username_to_tg_id:
+                    tg_id = username_to_tg_id[username]
+                    found_method = "по username из uchast"
+            
+            # Способ 2: ищем по ФИО в Person
+            if tg_id is None and norm_name and norm_name in name_to_person:
                 person = name_to_person[norm_name]
-                tg_id = person_id_to_tg_id.get(person.id)
+                if person.id in person_id_to_tg_id:
+                    tg_id = person_id_to_tg_id[person.id]
+                    found_method = "по ФИО"
+            
+            # Способ 3: ищем по username из 3-го столбика autobus.xlsx
+            if tg_id is None and norm_direct_username:
+                if norm_direct_username in username_to_tg_id:
+                    tg_id = username_to_tg_id[norm_direct_username]
+                    found_method = "по username из autobus"
+            
+            if tg_id:
                 found_list.append({
                     'name': full_name_str,
                     'bus': bus_number_str,
-                    'tg_id': tg_id
+                    'tg_id': tg_id,
+                    'method': found_method
+                })
+            elif norm_name and (norm_name in name_to_username or norm_name in name_to_person):
+                # Найден в файлах/базе, но без tg_id
+                found_list.append({
+                    'name': full_name_str,
+                    'bus': bus_number_str,
+                    'tg_id': None,
+                    'method': None
                 })
             else:
                 not_found_list.append({
                     'name': full_name_str,
-                    'bus': bus_number_str
+                    'bus': bus_number_str,
+                    'direct_username': norm_direct_username
                 })
         
         # Формируем статистику
         total = len(found_list) + len(not_found_list)
         with_tg_id = len([f for f in found_list if f['tg_id']])
         without_tg_id = len([f for f in found_list if not f['tg_id']])
+        found_by_uchast_username = len([f for f in found_list if f.get('method') == 'по username из uchast'])
+        found_by_fio = len([f for f in found_list if f.get('method') == 'по ФИО'])
+        found_by_autobus_username = len([f for f in found_list if f.get('method') == 'по username из autobus'])
         
         stats_text = (
-            f"📊 Результаты сопоставления autobus.xlsx с участниками\n\n"
+            f"📊 Результаты сопоставления\n\n"
             f"{'='*35}\n"
             f"📋 Всего в autobus.xlsx: {total} чел.\n"
-            f"✅ Найдено в таблице Person: {len(found_list)} чел.\n"
+            f"📋 Всего в uchast.xlsx: {len(df_uchast)} чел.\n\n"
+            f"✅ Найдено: {len(found_list)} чел.\n"
             f"   • С tg_id (получат рассылку): {with_tg_id}\n"
-            f"   • Без tg_id (не в боте): {without_tg_id}\n"
-            f"❌ Не найдено в таблице Person: {len(not_found_list)} чел.\n"
+            f"      - по username из uchast: {found_by_uchast_username}\n"
+            f"      - по ФИО: {found_by_fio}\n"
+            f"      - по username из autobus (3 столбик): {found_by_autobus_username}\n"
+            f"   • Без tg_id (не в боте): {without_tg_id}\n\n"
+            f"❌ Не найдено нигде: {len(not_found_list)} чел.\n"
             f"{'='*35}\n"
         )
         
@@ -1924,7 +2009,10 @@ async def test_autobus(message: types.Message):
             found_text = f"✅ Найденные участники ({len(found_list)} чел.):\n\n"
             
             for i, item in enumerate(found_list, 1):
-                tg_id_display = item['tg_id'] if item['tg_id'] else "❌ нет tg_id"
+                if item['tg_id']:
+                    tg_id_display = f"{item['tg_id']} ({item['method']})"
+                else:
+                    tg_id_display = "❌ нет tg_id"
                 found_text += f"{i}. {item['name']}\n   🚌 Автобус: {item['bus']}\n   📱 tg_id: {tg_id_display}\n\n"
             
             # Разбиваем на части если длинно
@@ -1933,7 +2021,10 @@ async def test_autobus(message: types.Message):
                 current = "✅ Найденные участники:\n\n"
                 
                 for i, item in enumerate(found_list, 1):
-                    tg_id_display = item['tg_id'] if item['tg_id'] else "❌ нет tg_id"
+                    if item['tg_id']:
+                        tg_id_display = f"{item['tg_id']} ({item['method']})"
+                    else:
+                        tg_id_display = "❌ нет tg_id"
                     line = f"{i}. {item['name']}\n   🚌 Автобус: {item['bus']}\n   📱 tg_id: {tg_id_display}\n\n"
                     
                     if len(current + line) > 4000:
@@ -1952,7 +2043,7 @@ async def test_autobus(message: types.Message):
         
         # Выводим список не найденных
         if not_found_list:
-            not_found_text = f"❌ Не найдены в таблице Person ({len(not_found_list)} чел.):\n\n"
+            not_found_text = f"❌ Не найдены ({len(not_found_list)} чел.):\n\n"
             
             for i, item in enumerate(not_found_list, 1):
                 not_found_text += f"{i}. {item['name']} (автобус: {item['bus']})\n"
@@ -1980,8 +2071,8 @@ async def test_autobus(message: types.Message):
         
     except Exception as e:
         await message.answer(
-            f"❌ Ошибка при обработке файла:\n{str(e)}\n\n"
-            f"Проверьте структуру файла autobus.xlsx"
+            f"❌ Ошибка при обработке файлов:\n{str(e)}\n\n"
+            f"Проверьте структуру файлов autobus.xlsx и uchast.xlsx"
         )
         import traceback
         traceback.print_exc()
@@ -1992,77 +2083,117 @@ async def autobus_send(message: types.Message):
     """Рассылка номеров автобусов участникам.
     
     Логика:
-    1. Читаем autobus.xlsx (ФИО + номер автобуса)
-    2. Ищем каждого по ФИО в таблице Person
-    3. Получаем tg_id через связь с BotUser
-    4. Отправляем персональное сообщение с номером автобуса
+    1. Читаем autobus.xlsx (ФИО + номер автобуса + опционально telegram_username)
+    2. Читаем uchast.xlsx (ФИО + telegram_username)
+    3. Сопоставляем по ФИО → ищем tg_id по username
+    4. Если не нашли — ищем по ФИО в Person
+    5. Если не нашли — проверяем 3-й столбик autobus.xlsx (username)
+    6. Отправляем персональное сообщение с номером автобуса
     """
     if message.from_user.id != ADMIN_ID:
         await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
         return
     
-    # Определяем путь к файлу autobus.xlsx
+    # Определяем пути к файлам
     try:
         project_root = Path(__file__).parent.parent
-        excel_path = project_root / 'autobus.xlsx'
-        if not excel_path.exists():
-            excel_path = Path('/app/autobus.xlsx')
+        autobus_path = project_root / 'autobus.xlsx'
+        uchast_path = project_root / 'uchast.xlsx'
+        if not autobus_path.exists():
+            autobus_path = Path('/app/autobus.xlsx')
+        if not uchast_path.exists():
+            uchast_path = Path('/app/uchast.xlsx')
     except:
-        excel_path = Path('/app/autobus.xlsx')
+        autobus_path = Path('/app/autobus.xlsx')
+        uchast_path = Path('/app/uchast.xlsx')
     
-    # Проверяем наличие файла
-    if not excel_path.exists():
-        await message.answer(
-            f"❌ Файл autobus.xlsx не найден!\n\n"
-            f"💡 Ожидаемый путь: {excel_path}\n"
-            f"💡 Убедитесь, что файл находится в корне проекта"
-        )
+    # Проверяем наличие файлов
+    if not autobus_path.exists():
+        await message.answer(f"❌ Файл autobus.xlsx не найден!")
         return
     
-    await message.answer("🔄 Читаю файл autobus.xlsx и готовлю рассылку...")
+    if not uchast_path.exists():
+        await message.answer(f"❌ Файл uchast.xlsx не найден!")
+        return
+    
+    await message.answer("🔄 Читаю файлы и готовлю рассылку...")
     
     try:
-        # Читаем Excel файл
-        df = pd.read_excel(str(excel_path))
-        
-        # Определяем названия колонок
-        fio_col = None
-        bus_col = None
-        
-        for col in df.columns:
-            col_lower = str(col).lower()
-            if 'фио' in col_lower or 'имя' in col_lower or 'фамилия' in col_lower:
-                fio_col = col
-            if 'автобус' in col_lower or 'номер' in col_lower or 'bus' in col_lower:
-                bus_col = col
-        
-        if fio_col is None:
-            fio_col = df.columns[0]
-        if bus_col is None:
-            bus_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
-        
-        # Функция нормализации имени
+        # Функции нормализации
         def normalize_name(name):
             if pd.isna(name) or not name:
                 return None
             return str(name).strip().lower()
         
-        # Получаем всех Person и связанных BotUser из базы
+        def normalize_username(raw):
+            if pd.isna(raw) or not raw:
+                return None
+            s = str(raw).strip()
+            if not s:
+                return None
+            if s.startswith('@'):
+                s = s[1:]
+            return s.lower()
+        
+        # Читаем autobus.xlsx
+        df_autobus = pd.read_excel(str(autobus_path))
+        
+        # Определяем колонки в autobus.xlsx
+        # Столбец 1 = ФИО, Столбец 2 = номер автобуса, Столбец 3 = telegram username (опционально)
+        fio_col = df_autobus.columns[0]
+        bus_col = df_autobus.columns[1] if len(df_autobus.columns) > 1 else df_autobus.columns[0]
+        autobus_tg_col = df_autobus.columns[2] if len(df_autobus.columns) > 2 else None
+        
+        # Читаем uchast.xlsx
+        df_uchast = pd.read_excel(str(uchast_path))
+        
+        # Определяем колонки в uchast.xlsx
+        uchast_fio_col = None
+        uchast_tg_col = None
+        for col in df_uchast.columns:
+            col_lower = str(col).lower()
+            if 'фио' in col_lower or 'имя' in col_lower or 'фамилия' in col_lower:
+                uchast_fio_col = col
+            if 'telegram' in col_lower or 'tg' in col_lower or 'username' in col_lower or '@' in str(df_uchast[col].iloc[0] if len(df_uchast) > 0 else ''):
+                uchast_tg_col = col
+        if uchast_fio_col is None:
+            uchast_fio_col = df_uchast.columns[0]
+        if uchast_tg_col is None and len(df_uchast.columns) > 1:
+            uchast_tg_col = df_uchast.columns[1]
+        
+        # Создаём словарь ФИО -> username из uchast.xlsx
+        name_to_username = {}
+        for _, row in df_uchast.iterrows():
+            fio = row.get(uchast_fio_col)
+            username = row.get(uchast_tg_col) if uchast_tg_col else None
+            norm_fio = normalize_name(fio)
+            norm_username = normalize_username(username)
+            if norm_fio and norm_username:
+                name_to_username[norm_fio] = norm_username
+        
+        # Получаем данные из БД
         async with async_session_maker() as session:
-            # Получаем всех Person
+            # Получаем всех BotUser
+            bot_users_stmt = select(BotUser)
+            bot_users_result = await session.execute(bot_users_stmt)
+            bot_users = bot_users_result.scalars().all()
+            
+            # Словарь username -> tg_id
+            username_to_tg_id = {}
+            for bu in bot_users:
+                if bu.telegram_username:
+                    norm_username = normalize_username(bu.telegram_username)
+                    if norm_username:
+                        username_to_tg_id[norm_username] = bu.tg_id
+            
+            # Словарь person_id -> tg_id
+            person_id_to_tg_id = {bu.person_id: bu.tg_id for bu in bot_users if bu.person_id}
+            
+            # Получаем всех Person для fallback
             people_stmt = select(Person)
             people_result = await session.execute(people_stmt)
             people = people_result.scalars().all()
             
-            # Получаем всех BotUser с person_id
-            bot_users_stmt = select(BotUser).where(BotUser.person_id.isnot(None))
-            bot_users_result = await session.execute(bot_users_stmt)
-            bot_users = bot_users_result.scalars().all()
-            
-            # Создаём словарь person_id -> tg_id
-            person_id_to_tg_id = {bu.person_id: bu.tg_id for bu in bot_users}
-            
-            # Создаём словарь для поиска по ФИО (нормализованное)
             name_to_person = {}
             for p in people:
                 norm_name = normalize_name(p.full_name)
@@ -2074,36 +2205,54 @@ async def autobus_send(message: types.Message):
         skipped_no_match = []
         skipped_no_tg_id = []
         
-        for index, row in df.iterrows():
+        for _, row in df_autobus.iterrows():
             full_name = row.get(fio_col)
             bus_number = row.get(bus_col)
+            # Третий столбик - telegram username для проблемных случаев
+            direct_username = row.get(autobus_tg_col) if autobus_tg_col else None
             
             if pd.isna(full_name) or not str(full_name).strip():
                 continue
             
             full_name_str = str(full_name).strip()
             bus_number_str = str(bus_number).strip() if not pd.isna(bus_number) else "?"
-            
             norm_name = normalize_name(full_name_str)
+            norm_direct_username = normalize_username(direct_username)
             
-            if norm_name and norm_name in name_to_person:
+            tg_id = None
+            
+            # Способ 1: ищем username в uchast.xlsx, потом tg_id в BotUser
+            if norm_name and norm_name in name_to_username:
+                username = name_to_username[norm_name]
+                if username in username_to_tg_id:
+                    tg_id = username_to_tg_id[username]
+            
+            # Способ 2: ищем по ФИО в Person
+            if tg_id is None and norm_name and norm_name in name_to_person:
                 person = name_to_person[norm_name]
-                tg_id = person_id_to_tg_id.get(person.id)
-                if tg_id:
-                    recipients.append({
-                        'name': full_name_str,
-                        'bus': bus_number_str,
-                        'tg_id': tg_id
-                    })
-                else:
-                    skipped_no_tg_id.append(full_name_str)
+                if person.id in person_id_to_tg_id:
+                    tg_id = person_id_to_tg_id[person.id]
+            
+            # Способ 3: ищем по username из 3-го столбика autobus.xlsx
+            if tg_id is None and norm_direct_username:
+                if norm_direct_username in username_to_tg_id:
+                    tg_id = username_to_tg_id[norm_direct_username]
+            
+            if tg_id:
+                recipients.append({
+                    'name': full_name_str,
+                    'bus': bus_number_str,
+                    'tg_id': tg_id
+                })
+            elif norm_name and (norm_name in name_to_username or norm_name in name_to_person):
+                skipped_no_tg_id.append(full_name_str)
             else:
                 skipped_no_match.append(full_name_str)
         
         if not recipients:
             await message.answer(
                 "❌ Не найдено получателей для рассылки!\n\n"
-                f"• Не найдено в Person: {len(skipped_no_match)}\n"
+                f"• Не найдено нигде: {len(skipped_no_match)}\n"
                 f"• Без tg_id (не в боте): {len(skipped_no_tg_id)}"
             )
             return
@@ -2112,8 +2261,8 @@ async def autobus_send(message: types.Message):
         await message.answer(
             f"📊 Подготовка к рассылке:\n\n"
             f"✅ Получат сообщение: {len(recipients)} чел.\n"
-            f"⚠️ Не найдены в Person: {len(skipped_no_match)} чел.\n"
-            f"⚠️ Без tg_id (не в боте): {len(skipped_no_tg_id)} чел.\n\n"
+            f"⚠️ Не найдены: {len(skipped_no_match)} чел.\n"
+            f"⚠️ Без tg_id: {len(skipped_no_tg_id)} чел.\n\n"
             f"🔄 Начинаю рассылку..."
         )
         
@@ -2133,7 +2282,6 @@ async def autobus_send(message: types.Message):
         
         for recipient in recipients:
             try:
-                # Формируем персональное сообщение
                 personal_message = MESSAGE_TEMPLATE.format(bus_number=recipient['bus'])
                 
                 await message.bot.send_message(
@@ -2178,7 +2326,7 @@ async def autobus_send(message: types.Message):
     except Exception as e:
         await message.answer(
             f"❌ Ошибка при рассылке:\n{str(e)}\n\n"
-            f"Проверьте структуру файла autobus.xlsx"
+            f"Проверьте структуру файлов"
         )
         import traceback
         traceback.print_exc()
