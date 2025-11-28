@@ -1786,3 +1786,377 @@ async def cancel_command(message: types.Message, state: FSMContext):
     else:
         await message.answer("Нечего отменять.")
 
+
+@admin_router.message(Command(commands=['test_autobus']))
+async def test_autobus(message: types.Message):
+    """Тестовая команда для проверки сопоставления участников с номерами автобусов.
+    
+    Логика:
+    1. Читаем autobus.xlsx (ФИО + номер автобуса)
+    2. Ищем каждого по ФИО в таблице Uchastnik
+    3. Получаем tg_id из Uchastnik
+    4. Выводим пронумерованный список: ФИО, номер автобуса, tg_id
+    """
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
+        return
+    
+    # Определяем путь к файлу autobus.xlsx
+    try:
+        project_root = Path(__file__).parent.parent
+        excel_path = project_root / 'autobus.xlsx'
+        if not excel_path.exists():
+            excel_path = Path('/app/autobus.xlsx')
+    except:
+        excel_path = Path('/app/autobus.xlsx')
+    
+    # Проверяем наличие файла
+    if not excel_path.exists():
+        await message.answer(
+            f"❌ Файл autobus.xlsx не найден!\n\n"
+            f"💡 Ожидаемый путь: {excel_path}\n"
+            f"💡 Убедитесь, что файл находится в корне проекта"
+        )
+        return
+    
+    await message.answer("🔄 Читаю файл autobus.xlsx и сопоставляю с участниками...")
+    
+    try:
+        # Читаем Excel файл
+        df = pd.read_excel(str(excel_path))
+        
+        # Определяем названия колонок
+        # Ищем колонку с ФИО
+        fio_col = None
+        bus_col = None
+        
+        for col in df.columns:
+            col_lower = str(col).lower()
+            if 'фио' in col_lower or 'имя' in col_lower or 'фамилия' in col_lower:
+                fio_col = col
+            if 'автобус' in col_lower or 'номер' in col_lower or 'bus' in col_lower:
+                bus_col = col
+        
+        # Если не нашли по названию, берём первые две колонки
+        if fio_col is None:
+            fio_col = df.columns[0]
+        if bus_col is None:
+            bus_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        
+        # Получаем всех участников из базы
+        async with async_session_maker() as session:
+            uchastniki_stmt = select(Uchastnik)
+            uchastniki_result = await session.execute(uchastniki_stmt)
+            uchastniki = uchastniki_result.scalars().all()
+            
+            # Создаём словарь для поиска по ФИО (нормализованное)
+            def normalize_name(name):
+                if pd.isna(name) or not name:
+                    return None
+                return str(name).strip().lower()
+            
+            name_to_uchastnik = {}
+            for u in uchastniki:
+                norm_name = normalize_name(u.full_name)
+                if norm_name:
+                    name_to_uchastnik[norm_name] = u
+        
+        # Сопоставляем
+        found_list = []
+        not_found_list = []
+        
+        for index, row in df.iterrows():
+            full_name = row.get(fio_col)
+            bus_number = row.get(bus_col)
+            
+            if pd.isna(full_name) or not str(full_name).strip():
+                continue
+            
+            full_name_str = str(full_name).strip()
+            bus_number_str = str(bus_number).strip() if not pd.isna(bus_number) else "?"
+            
+            norm_name = normalize_name(full_name_str)
+            
+            if norm_name and norm_name in name_to_uchastnik:
+                uchastnik = name_to_uchastnik[norm_name]
+                found_list.append({
+                    'name': full_name_str,
+                    'bus': bus_number_str,
+                    'tg_id': uchastnik.tg_id
+                })
+            else:
+                not_found_list.append({
+                    'name': full_name_str,
+                    'bus': bus_number_str
+                })
+        
+        # Формируем статистику
+        total = len(found_list) + len(not_found_list)
+        with_tg_id = len([f for f in found_list if f['tg_id']])
+        without_tg_id = len([f for f in found_list if not f['tg_id']])
+        
+        stats_text = (
+            f"📊 Результаты сопоставления autobus.xlsx с участниками\n\n"
+            f"{'='*35}\n"
+            f"📋 Всего в autobus.xlsx: {total} чел.\n"
+            f"✅ Найдено в таблице участников: {len(found_list)} чел.\n"
+            f"   • С tg_id (получат рассылку): {with_tg_id}\n"
+            f"   • Без tg_id (не получат): {without_tg_id}\n"
+            f"❌ Не найдено в таблице участников: {len(not_found_list)} чел.\n"
+            f"{'='*35}\n"
+        )
+        
+        await message.answer(stats_text)
+        
+        # Выводим пронумерованный список найденных
+        if found_list:
+            found_text = f"✅ Найденные участники ({len(found_list)} чел.):\n\n"
+            
+            for i, item in enumerate(found_list, 1):
+                tg_id_display = item['tg_id'] if item['tg_id'] else "❌ нет tg_id"
+                found_text += f"{i}. {item['name']}\n   🚌 Автобус: {item['bus']}\n   📱 tg_id: {tg_id_display}\n\n"
+            
+            # Разбиваем на части если длинно
+            if len(found_text) > 4000:
+                parts = []
+                current = "✅ Найденные участники:\n\n"
+                
+                for i, item in enumerate(found_list, 1):
+                    tg_id_display = item['tg_id'] if item['tg_id'] else "❌ нет tg_id"
+                    line = f"{i}. {item['name']}\n   🚌 Автобус: {item['bus']}\n   📱 tg_id: {tg_id_display}\n\n"
+                    
+                    if len(current + line) > 4000:
+                        parts.append(current)
+                        current = line
+                    else:
+                        current += line
+                
+                if current.strip():
+                    parts.append(current)
+                
+                for part in parts:
+                    await message.answer(part)
+            else:
+                await message.answer(found_text)
+        
+        # Выводим список не найденных
+        if not_found_list:
+            not_found_text = f"❌ Не найдены в таблице участников ({len(not_found_list)} чел.):\n\n"
+            
+            for i, item in enumerate(not_found_list, 1):
+                not_found_text += f"{i}. {item['name']} (автобус: {item['bus']})\n"
+            
+            if len(not_found_text) > 4000:
+                parts = []
+                current = "❌ Не найдены:\n\n"
+                
+                for i, item in enumerate(not_found_list, 1):
+                    line = f"{i}. {item['name']} (автобус: {item['bus']})\n"
+                    
+                    if len(current + line) > 4000:
+                        parts.append(current)
+                        current = line
+                    else:
+                        current += line
+                
+                if current.strip():
+                    parts.append(current)
+                
+                for part in parts:
+                    await message.answer(part)
+            else:
+                await message.answer(not_found_text)
+        
+    except Exception as e:
+        await message.answer(
+            f"❌ Ошибка при обработке файла:\n{str(e)}\n\n"
+            f"Проверьте структуру файла autobus.xlsx"
+        )
+        import traceback
+        traceback.print_exc()
+
+
+@admin_router.message(Command(commands=['autobus']))
+async def autobus_send(message: types.Message):
+    """Рассылка номеров автобусов участникам.
+    
+    Логика:
+    1. Читаем autobus.xlsx (ФИО + номер автобуса)
+    2. Ищем каждого по ФИО в таблице Uchastnik
+    3. Получаем tg_id из Uchastnik
+    4. Отправляем персональное сообщение с номером автобуса
+    """
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
+        return
+    
+    # Определяем путь к файлу autobus.xlsx
+    try:
+        project_root = Path(__file__).parent.parent
+        excel_path = project_root / 'autobus.xlsx'
+        if not excel_path.exists():
+            excel_path = Path('/app/autobus.xlsx')
+    except:
+        excel_path = Path('/app/autobus.xlsx')
+    
+    # Проверяем наличие файла
+    if not excel_path.exists():
+        await message.answer(
+            f"❌ Файл autobus.xlsx не найден!\n\n"
+            f"💡 Ожидаемый путь: {excel_path}\n"
+            f"💡 Убедитесь, что файл находится в корне проекта"
+        )
+        return
+    
+    await message.answer("🔄 Читаю файл autobus.xlsx и готовлю рассылку...")
+    
+    try:
+        # Читаем Excel файл
+        df = pd.read_excel(str(excel_path))
+        
+        # Определяем названия колонок
+        fio_col = None
+        bus_col = None
+        
+        for col in df.columns:
+            col_lower = str(col).lower()
+            if 'фио' in col_lower or 'имя' in col_lower or 'фамилия' in col_lower:
+                fio_col = col
+            if 'автобус' in col_lower or 'номер' in col_lower or 'bus' in col_lower:
+                bus_col = col
+        
+        if fio_col is None:
+            fio_col = df.columns[0]
+        if bus_col is None:
+            bus_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        
+        # Получаем всех участников из базы
+        async with async_session_maker() as session:
+            uchastniki_stmt = select(Uchastnik)
+            uchastniki_result = await session.execute(uchastniki_stmt)
+            uchastniki = uchastniki_result.scalars().all()
+            
+            def normalize_name(name):
+                if pd.isna(name) or not name:
+                    return None
+                return str(name).strip().lower()
+            
+            name_to_uchastnik = {}
+            for u in uchastniki:
+                norm_name = normalize_name(u.full_name)
+                if norm_name:
+                    name_to_uchastnik[norm_name] = u
+        
+        # Формируем список для рассылки
+        recipients = []
+        skipped_no_match = []
+        skipped_no_tg_id = []
+        
+        for index, row in df.iterrows():
+            full_name = row.get(fio_col)
+            bus_number = row.get(bus_col)
+            
+            if pd.isna(full_name) or not str(full_name).strip():
+                continue
+            
+            full_name_str = str(full_name).strip()
+            bus_number_str = str(bus_number).strip() if not pd.isna(bus_number) else "?"
+            
+            norm_name = normalize_name(full_name_str)
+            
+            if norm_name and norm_name in name_to_uchastnik:
+                uchastnik = name_to_uchastnik[norm_name]
+                if uchastnik.tg_id:
+                    recipients.append({
+                        'name': full_name_str,
+                        'bus': bus_number_str,
+                        'tg_id': uchastnik.tg_id
+                    })
+                else:
+                    skipped_no_tg_id.append(full_name_str)
+            else:
+                skipped_no_match.append(full_name_str)
+        
+        if not recipients:
+            await message.answer(
+                "❌ Не найдено получателей для рассылки!\n\n"
+                f"• Не найдено в участниках: {len(skipped_no_match)}\n"
+                f"• Без tg_id: {len(skipped_no_tg_id)}"
+            )
+            return
+        
+        # Показываем статистику перед рассылкой
+        await message.answer(
+            f"📊 Подготовка к рассылке:\n\n"
+            f"✅ Получат сообщение: {len(recipients)} чел.\n"
+            f"⚠️ Не найдены в участниках: {len(skipped_no_match)} чел.\n"
+            f"⚠️ Без tg_id: {len(skipped_no_tg_id)} чел.\n\n"
+            f"🔄 Начинаю рассылку..."
+        )
+        
+        # Шаблон сообщения
+        MESSAGE_TEMPLATE = """Привет!
+
+Напоминаем тебе, что завтра необходимо приехать в корпус по адресу: ул. Ленинградский проспект, 49 к 6:30. Сбор на 1 этаже у гардероба. Ровно в 7:20 автобусы будут отъезжать.
+
+Присылаем тебе номер автобуса, на котором ты поедешь. Рядом с каждым автобусом будет стоять организатор с цифрой 1, 2 или 3. При появлении вопросов — обращайся к ним!
+
+📎 Номер твоего автобуса — {bus_number}"""
+        
+        sent = 0
+        errors = 0
+        blocked = 0
+        PAUSE_SECONDS = 0.1
+        
+        for recipient in recipients:
+            try:
+                # Формируем персональное сообщение
+                personal_message = MESSAGE_TEMPLATE.format(bus_number=recipient['bus'])
+                
+                await message.bot.send_message(
+                    chat_id=recipient['tg_id'],
+                    text=personal_message
+                )
+                sent += 1
+                await asyncio.sleep(PAUSE_SECONDS)
+                
+            except TelegramBadRequest as e:
+                errors += 1
+                error_msg = str(e).lower()
+                if 'blocked' in error_msg or 'chat not found' in error_msg:
+                    blocked += 1
+                print(f"Ошибка отправки для {recipient['name']}: {e}")
+            except Exception as e:
+                errors += 1
+                print(f"Ошибка отправки для {recipient['name']}: {e}")
+        
+        # Финальная статистика
+        stats_text = (
+            f"✅ Рассылка номеров автобусов завершена!\n\n"
+            f"{'='*35}\n"
+            f"📊 СТАТИСТИКА РАССЫЛКИ\n"
+            f"{'='*35}\n\n"
+            f"📋 Всего получателей: {len(recipients)}\n"
+            f"✅ Успешно отправлено: {sent}\n"
+            f"❌ Ошибок: {errors}\n"
+        )
+        
+        if blocked > 0:
+            stats_text += f"   🚫 Заблокировали бота: {blocked}\n"
+        
+        if len(recipients) > 0:
+            percentage = (sent / len(recipients)) * 100
+            stats_text += f"\n📈 Успешность: {percentage:.1f}%"
+        
+        stats_text += f"\n{'='*35}"
+        
+        await message.answer(stats_text)
+        
+    except Exception as e:
+        await message.answer(
+            f"❌ Ошибка при рассылке:\n{str(e)}\n\n"
+            f"Проверьте структуру файла autobus.xlsx"
+        )
+        import traceback
+        traceback.print_exc()
+
