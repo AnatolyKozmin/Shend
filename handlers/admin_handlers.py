@@ -129,6 +129,11 @@ class UchsocRassStates(StatesGroup):
     sending = State()  # Состояние во время рассылки (для возможности отмены)
 
 
+class DodepusStates(StatesGroup):
+    """Состояния для рассылки по фамилиям из dodep.xlsx."""
+    waiting_text = State()
+
+
 @admin_router.message(Command(commands=['create_rass']))
 async def create_rass(message: types.Message, state: FSMContext):
     # только админ
@@ -2330,4 +2335,363 @@ async def autobus_send(message: types.Message):
         )
         import traceback
         traceback.print_exc()
+
+
+@admin_router.message(Command(commands=['dodepus_test']))
+async def dodepus_test(message: types.Message):
+    """Тестовая команда для проверки поиска по фамилиям из dodep.xlsx.
+    
+    Логика:
+    1. Читаем dodep.xlsx (один столбик с фамилиями)
+    2. Ищем каждую фамилию в таблице Person (full_name начинается с фамилии)
+    3. Получаем tg_id через связь с BotUser
+    4. Выводим пронумерованный список: фамилия, ФИО, tg_id
+    """
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
+        return
+    
+    # Определяем путь к файлу
+    try:
+        project_root = Path(__file__).parent.parent
+        dodep_path = project_root / 'dodep.xlsx'
+        if not dodep_path.exists():
+            dodep_path = Path('/app/dodep.xlsx')
+    except:
+        dodep_path = Path('/app/dodep.xlsx')
+    
+    if not dodep_path.exists():
+        await message.answer(
+            f"❌ Файл dodep.xlsx не найден!\n\n"
+            f"💡 Ожидаемый путь: {dodep_path}"
+        )
+        return
+    
+    await message.answer("🔄 Читаю файл dodep.xlsx и ищу по фамилиям...")
+    
+    try:
+        # Читаем Excel файл
+        df = pd.read_excel(str(dodep_path))
+        
+        # Берём первый столбик (фамилии)
+        surname_col = df.columns[0]
+        
+        # Функция нормализации
+        def normalize_surname(name):
+            if pd.isna(name) or not name:
+                return None
+            return str(name).strip().lower()
+        
+        # Получаем данные из БД
+        async with async_session_maker() as session:
+            # Получаем всех Person
+            people_stmt = select(Person)
+            people_result = await session.execute(people_stmt)
+            people = people_result.scalars().all()
+            
+            # Получаем всех BotUser
+            bot_users_stmt = select(BotUser)
+            bot_users_result = await session.execute(bot_users_stmt)
+            bot_users = bot_users_result.scalars().all()
+            
+            # Словарь person_id -> tg_id
+            person_id_to_tg_id = {bu.person_id: bu.tg_id for bu in bot_users if bu.person_id}
+        
+        # Ищем по фамилиям
+        found_list = []
+        not_found_list = []
+        
+        for _, row in df.iterrows():
+            surname = row.get(surname_col)
+            
+            if pd.isna(surname) or not str(surname).strip():
+                continue
+            
+            surname_str = str(surname).strip()
+            norm_surname = normalize_surname(surname_str)
+            
+            # Ищем Person, чьё full_name начинается с этой фамилии
+            found_person = None
+            for p in people:
+                if p.full_name and p.full_name.lower().startswith(norm_surname):
+                    found_person = p
+                    break
+            
+            if found_person:
+                tg_id = person_id_to_tg_id.get(found_person.id)
+                found_list.append({
+                    'surname': surname_str,
+                    'full_name': found_person.full_name,
+                    'tg_id': tg_id
+                })
+            else:
+                not_found_list.append(surname_str)
+        
+        # Статистика
+        total = len(found_list) + len(not_found_list)
+        with_tg_id = len([f for f in found_list if f['tg_id']])
+        without_tg_id = len([f for f in found_list if not f['tg_id']])
+        
+        stats_text = (
+            f"📊 Результаты поиска по фамилиям (dodep.xlsx)\n\n"
+            f"{'='*35}\n"
+            f"📋 Всего фамилий в файле: {total}\n"
+            f"✅ Найдено в Person: {len(found_list)} чел.\n"
+            f"   • С tg_id (получат рассылку): {with_tg_id}\n"
+            f"   • Без tg_id (не в боте): {without_tg_id}\n"
+            f"❌ Не найдено: {len(not_found_list)} чел.\n"
+            f"{'='*35}\n"
+        )
+        
+        await message.answer(stats_text)
+        
+        # Выводим найденных
+        if found_list:
+            found_text = f"✅ Найденные ({len(found_list)} чел.):\n\n"
+            
+            for i, item in enumerate(found_list, 1):
+                tg_id_display = item['tg_id'] if item['tg_id'] else "❌ нет tg_id"
+                found_text += f"{i}. {item['surname']} → {item['full_name']}\n   📱 tg_id: {tg_id_display}\n\n"
+            
+            # Разбиваем на части если длинно
+            if len(found_text) > 4000:
+                parts = []
+                current = "✅ Найденные:\n\n"
+                
+                for i, item in enumerate(found_list, 1):
+                    tg_id_display = item['tg_id'] if item['tg_id'] else "❌ нет tg_id"
+                    line = f"{i}. {item['surname']} → {item['full_name']}\n   📱 tg_id: {tg_id_display}\n\n"
+                    
+                    if len(current + line) > 4000:
+                        parts.append(current)
+                        current = line
+                    else:
+                        current += line
+                
+                if current.strip():
+                    parts.append(current)
+                
+                for part in parts:
+                    await message.answer(part)
+            else:
+                await message.answer(found_text)
+        
+        # Выводим не найденных
+        if not_found_list:
+            not_found_text = f"❌ Не найдены ({len(not_found_list)} чел.):\n\n"
+            
+            for i, surname in enumerate(not_found_list, 1):
+                not_found_text += f"{i}. {surname}\n"
+            
+            if len(not_found_text) > 4000:
+                parts = []
+                current = "❌ Не найдены:\n\n"
+                
+                for i, surname in enumerate(not_found_list, 1):
+                    line = f"{i}. {surname}\n"
+                    
+                    if len(current + line) > 4000:
+                        parts.append(current)
+                        current = line
+                    else:
+                        current += line
+                
+                if current.strip():
+                    parts.append(current)
+                
+                for part in parts:
+                    await message.answer(part)
+            else:
+                await message.answer(not_found_text)
+        
+    except Exception as e:
+        await message.answer(
+            f"❌ Ошибка при обработке файла:\n{str(e)}\n\n"
+            f"Проверьте структуру файла dodep.xlsx"
+        )
+        import traceback
+        traceback.print_exc()
+
+
+@admin_router.message(Command(commands=['dodepus']))
+async def dodepus_start(message: types.Message, state: FSMContext):
+    """Начало рассылки по фамилиям из dodep.xlsx — спрашивает текст сообщения."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer(f"⛔ Нет доступа. Ваш ID: {message.from_user.id}, нужен: {ADMIN_ID}")
+        return
+    
+    # Определяем путь к файлу
+    try:
+        project_root = Path(__file__).parent.parent
+        dodep_path = project_root / 'dodep.xlsx'
+        if not dodep_path.exists():
+            dodep_path = Path('/app/dodep.xlsx')
+    except:
+        dodep_path = Path('/app/dodep.xlsx')
+    
+    if not dodep_path.exists():
+        await message.answer(f"❌ Файл dodep.xlsx не найден!")
+        return
+    
+    await message.answer("🔄 Читаю файл dodep.xlsx...")
+    
+    try:
+        # Читаем Excel файл
+        df = pd.read_excel(str(dodep_path))
+        
+        # Берём первый столбик (фамилии)
+        surname_col = df.columns[0]
+        
+        def normalize_surname(name):
+            if pd.isna(name) or not name:
+                return None
+            return str(name).strip().lower()
+        
+        # Получаем данные из БД
+        async with async_session_maker() as session:
+            # Получаем всех Person
+            people_stmt = select(Person)
+            people_result = await session.execute(people_stmt)
+            people = people_result.scalars().all()
+            
+            # Получаем всех BotUser
+            bot_users_stmt = select(BotUser)
+            bot_users_result = await session.execute(bot_users_stmt)
+            bot_users = bot_users_result.scalars().all()
+            
+            # Словарь person_id -> tg_id
+            person_id_to_tg_id = {bu.person_id: bu.tg_id for bu in bot_users if bu.person_id}
+        
+        # Формируем список получателей
+        recipients = []
+        skipped_no_match = []
+        skipped_no_tg_id = []
+        
+        for _, row in df.iterrows():
+            surname = row.get(surname_col)
+            
+            if pd.isna(surname) or not str(surname).strip():
+                continue
+            
+            surname_str = str(surname).strip()
+            norm_surname = normalize_surname(surname_str)
+            
+            # Ищем Person по фамилии
+            found_person = None
+            for p in people:
+                if p.full_name and p.full_name.lower().startswith(norm_surname):
+                    found_person = p
+                    break
+            
+            if found_person:
+                tg_id = person_id_to_tg_id.get(found_person.id)
+                if tg_id:
+                    recipients.append({
+                        'surname': surname_str,
+                        'full_name': found_person.full_name,
+                        'tg_id': tg_id
+                    })
+                else:
+                    skipped_no_tg_id.append(surname_str)
+            else:
+                skipped_no_match.append(surname_str)
+        
+        if not recipients:
+            await message.answer(
+                "❌ Не найдено получателей для рассылки!\n\n"
+                f"• Не найдено в Person: {len(skipped_no_match)}\n"
+                f"• Без tg_id: {len(skipped_no_tg_id)}"
+            )
+            return
+        
+        # Сохраняем список получателей в state
+        await state.update_data(recipients=recipients, skipped_no_match=len(skipped_no_match), skipped_no_tg_id=len(skipped_no_tg_id))
+        await state.set_state(DodepusStates.waiting_text)
+        
+        await message.answer(
+            f"📊 Подготовка к рассылке:\n\n"
+            f"✅ Получат сообщение: {len(recipients)} чел.\n"
+            f"⚠️ Не найдены: {len(skipped_no_match)} чел.\n"
+            f"⚠️ Без tg_id: {len(skipped_no_tg_id)} чел.\n\n"
+            f"📝 Пришлите текст сообщения для рассылки:"
+        )
+        
+    except Exception as e:
+        await message.answer(
+            f"❌ Ошибка при чтении файла:\n{str(e)}\n\n"
+            f"Проверьте структуру файла dodep.xlsx"
+        )
+        import traceback
+        traceback.print_exc()
+
+
+@admin_router.message(StateFilter(DodepusStates.waiting_text))
+async def dodepus_send(message: types.Message, state: FSMContext):
+    """Отправка рассылки по фамилиям из dodep.xlsx."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    text = message.text
+    
+    if not text or not text.strip():
+        await message.answer("❌ Текст сообщения не может быть пустым. Попробуйте снова:")
+        return
+    
+    # Получаем список получателей из state
+    data = await state.get_data()
+    recipients = data.get('recipients', [])
+    
+    if not recipients:
+        await message.answer("❌ Список получателей пуст. Начните заново с /dodepus")
+        await state.clear()
+        return
+    
+    await message.answer(f"🔄 Начинаю рассылку {len(recipients)} получателям...")
+    
+    sent = 0
+    errors = 0
+    blocked = 0
+    PAUSE_SECONDS = 0.1
+    
+    for recipient in recipients:
+        try:
+            await message.bot.send_message(
+                chat_id=recipient['tg_id'],
+                text=text
+            )
+            sent += 1
+            await asyncio.sleep(PAUSE_SECONDS)
+            
+        except TelegramBadRequest as e:
+            errors += 1
+            error_msg = str(e).lower()
+            if 'blocked' in error_msg or 'chat not found' in error_msg:
+                blocked += 1
+            print(f"Ошибка отправки для {recipient['full_name']}: {e}")
+        except Exception as e:
+            errors += 1
+            print(f"Ошибка отправки для {recipient['full_name']}: {e}")
+    
+    # Финальная статистика
+    stats_text = (
+        f"✅ Рассылка завершена!\n\n"
+        f"{'='*35}\n"
+        f"📊 СТАТИСТИКА РАССЫЛКИ\n"
+        f"{'='*35}\n\n"
+        f"📋 Всего получателей: {len(recipients)}\n"
+        f"✅ Успешно отправлено: {sent}\n"
+        f"❌ Ошибок: {errors}\n"
+    )
+    
+    if blocked > 0:
+        stats_text += f"   🚫 Заблокировали бота: {blocked}\n"
+    
+    if len(recipients) > 0:
+        percentage = (sent / len(recipients)) * 100
+        stats_text += f"\n📈 Успешность: {percentage:.1f}%"
+    
+    stats_text += f"\n{'='*35}"
+    
+    await message.answer(stats_text)
+    await state.clear()
 
