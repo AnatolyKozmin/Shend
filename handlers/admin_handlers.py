@@ -1793,8 +1793,8 @@ async def test_autobus(message: types.Message):
     
     Логика:
     1. Читаем autobus.xlsx (ФИО + номер автобуса)
-    2. Ищем каждого по ФИО в таблице Uchastnik
-    3. Получаем tg_id из Uchastnik
+    2. Ищем каждого по ФИО в таблице Person
+    3. Получаем tg_id через связь с BotUser
     4. Выводим пронумерованный список: ФИО, номер автобуса, tg_id
     """
     if message.from_user.id != ADMIN_ID:
@@ -1843,23 +1843,33 @@ async def test_autobus(message: types.Message):
         if bus_col is None:
             bus_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
         
-        # Получаем всех участников из базы
+        # Функция нормализации имени
+        def normalize_name(name):
+            if pd.isna(name) or not name:
+                return None
+            return str(name).strip().lower()
+        
+        # Получаем всех Person и связанных BotUser из базы
         async with async_session_maker() as session:
-            uchastniki_stmt = select(Uchastnik)
-            uchastniki_result = await session.execute(uchastniki_stmt)
-            uchastniki = uchastniki_result.scalars().all()
+            # Получаем всех Person
+            people_stmt = select(Person)
+            people_result = await session.execute(people_stmt)
+            people = people_result.scalars().all()
+            
+            # Получаем всех BotUser с person_id
+            bot_users_stmt = select(BotUser).where(BotUser.person_id.isnot(None))
+            bot_users_result = await session.execute(bot_users_stmt)
+            bot_users = bot_users_result.scalars().all()
+            
+            # Создаём словарь person_id -> tg_id
+            person_id_to_tg_id = {bu.person_id: bu.tg_id for bu in bot_users}
             
             # Создаём словарь для поиска по ФИО (нормализованное)
-            def normalize_name(name):
-                if pd.isna(name) or not name:
-                    return None
-                return str(name).strip().lower()
-            
-            name_to_uchastnik = {}
-            for u in uchastniki:
-                norm_name = normalize_name(u.full_name)
+            name_to_person = {}
+            for p in people:
+                norm_name = normalize_name(p.full_name)
                 if norm_name:
-                    name_to_uchastnik[norm_name] = u
+                    name_to_person[norm_name] = p
         
         # Сопоставляем
         found_list = []
@@ -1877,12 +1887,13 @@ async def test_autobus(message: types.Message):
             
             norm_name = normalize_name(full_name_str)
             
-            if norm_name and norm_name in name_to_uchastnik:
-                uchastnik = name_to_uchastnik[norm_name]
+            if norm_name and norm_name in name_to_person:
+                person = name_to_person[norm_name]
+                tg_id = person_id_to_tg_id.get(person.id)
                 found_list.append({
                     'name': full_name_str,
                     'bus': bus_number_str,
-                    'tg_id': uchastnik.tg_id
+                    'tg_id': tg_id
                 })
             else:
                 not_found_list.append({
@@ -1899,10 +1910,10 @@ async def test_autobus(message: types.Message):
             f"📊 Результаты сопоставления autobus.xlsx с участниками\n\n"
             f"{'='*35}\n"
             f"📋 Всего в autobus.xlsx: {total} чел.\n"
-            f"✅ Найдено в таблице участников: {len(found_list)} чел.\n"
+            f"✅ Найдено в таблице Person: {len(found_list)} чел.\n"
             f"   • С tg_id (получат рассылку): {with_tg_id}\n"
-            f"   • Без tg_id (не получат): {without_tg_id}\n"
-            f"❌ Не найдено в таблице участников: {len(not_found_list)} чел.\n"
+            f"   • Без tg_id (не в боте): {without_tg_id}\n"
+            f"❌ Не найдено в таблице Person: {len(not_found_list)} чел.\n"
             f"{'='*35}\n"
         )
         
@@ -1941,7 +1952,7 @@ async def test_autobus(message: types.Message):
         
         # Выводим список не найденных
         if not_found_list:
-            not_found_text = f"❌ Не найдены в таблице участников ({len(not_found_list)} чел.):\n\n"
+            not_found_text = f"❌ Не найдены в таблице Person ({len(not_found_list)} чел.):\n\n"
             
             for i, item in enumerate(not_found_list, 1):
                 not_found_text += f"{i}. {item['name']} (автобус: {item['bus']})\n"
@@ -1982,8 +1993,8 @@ async def autobus_send(message: types.Message):
     
     Логика:
     1. Читаем autobus.xlsx (ФИО + номер автобуса)
-    2. Ищем каждого по ФИО в таблице Uchastnik
-    3. Получаем tg_id из Uchastnik
+    2. Ищем каждого по ФИО в таблице Person
+    3. Получаем tg_id через связь с BotUser
     4. Отправляем персональное сообщение с номером автобуса
     """
     if message.from_user.id != ADMIN_ID:
@@ -2030,22 +2041,33 @@ async def autobus_send(message: types.Message):
         if bus_col is None:
             bus_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
         
-        # Получаем всех участников из базы
+        # Функция нормализации имени
+        def normalize_name(name):
+            if pd.isna(name) or not name:
+                return None
+            return str(name).strip().lower()
+        
+        # Получаем всех Person и связанных BotUser из базы
         async with async_session_maker() as session:
-            uchastniki_stmt = select(Uchastnik)
-            uchastniki_result = await session.execute(uchastniki_stmt)
-            uchastniki = uchastniki_result.scalars().all()
+            # Получаем всех Person
+            people_stmt = select(Person)
+            people_result = await session.execute(people_stmt)
+            people = people_result.scalars().all()
             
-            def normalize_name(name):
-                if pd.isna(name) or not name:
-                    return None
-                return str(name).strip().lower()
+            # Получаем всех BotUser с person_id
+            bot_users_stmt = select(BotUser).where(BotUser.person_id.isnot(None))
+            bot_users_result = await session.execute(bot_users_stmt)
+            bot_users = bot_users_result.scalars().all()
             
-            name_to_uchastnik = {}
-            for u in uchastniki:
-                norm_name = normalize_name(u.full_name)
+            # Создаём словарь person_id -> tg_id
+            person_id_to_tg_id = {bu.person_id: bu.tg_id for bu in bot_users}
+            
+            # Создаём словарь для поиска по ФИО (нормализованное)
+            name_to_person = {}
+            for p in people:
+                norm_name = normalize_name(p.full_name)
                 if norm_name:
-                    name_to_uchastnik[norm_name] = u
+                    name_to_person[norm_name] = p
         
         # Формируем список для рассылки
         recipients = []
@@ -2064,13 +2086,14 @@ async def autobus_send(message: types.Message):
             
             norm_name = normalize_name(full_name_str)
             
-            if norm_name and norm_name in name_to_uchastnik:
-                uchastnik = name_to_uchastnik[norm_name]
-                if uchastnik.tg_id:
+            if norm_name and norm_name in name_to_person:
+                person = name_to_person[norm_name]
+                tg_id = person_id_to_tg_id.get(person.id)
+                if tg_id:
                     recipients.append({
                         'name': full_name_str,
                         'bus': bus_number_str,
-                        'tg_id': uchastnik.tg_id
+                        'tg_id': tg_id
                     })
                 else:
                     skipped_no_tg_id.append(full_name_str)
@@ -2080,8 +2103,8 @@ async def autobus_send(message: types.Message):
         if not recipients:
             await message.answer(
                 "❌ Не найдено получателей для рассылки!\n\n"
-                f"• Не найдено в участниках: {len(skipped_no_match)}\n"
-                f"• Без tg_id: {len(skipped_no_tg_id)}"
+                f"• Не найдено в Person: {len(skipped_no_match)}\n"
+                f"• Без tg_id (не в боте): {len(skipped_no_tg_id)}"
             )
             return
         
@@ -2089,8 +2112,8 @@ async def autobus_send(message: types.Message):
         await message.answer(
             f"📊 Подготовка к рассылке:\n\n"
             f"✅ Получат сообщение: {len(recipients)} чел.\n"
-            f"⚠️ Не найдены в участниках: {len(skipped_no_match)} чел.\n"
-            f"⚠️ Без tg_id: {len(skipped_no_tg_id)} чел.\n\n"
+            f"⚠️ Не найдены в Person: {len(skipped_no_match)} чел.\n"
+            f"⚠️ Без tg_id (не в боте): {len(skipped_no_tg_id)} чел.\n\n"
             f"🔄 Начинаю рассылку..."
         )
         
